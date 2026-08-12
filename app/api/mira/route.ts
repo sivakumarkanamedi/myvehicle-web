@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { consumeRateLimit } from "../../../lib/rateLimit";
 
 import {
   decideMiraIntent,
@@ -403,6 +404,29 @@ export async function POST(request: Request) {
           error: "Your login session is invalid or expired.",
         },
         { status: 401 }
+      );
+    }
+
+    const rateLimit = await consumeRateLimit({
+      userId: user.id,
+      key: "mira_chat",
+      windowSeconds: 60,
+      maxRequests: 20,
+    });
+
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          error: "Too many Mira requests. Please wait a moment and try again.",
+          retry_after: rateLimit.resetAt,
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Remaining": String(rateLimit.remaining),
+            "X-RateLimit-Reset": rateLimit.resetAt,
+          },
+        }
       );
     }
 
