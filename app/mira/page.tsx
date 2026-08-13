@@ -396,6 +396,78 @@ export default function MiraPage() {
     );
   }
 
+  function getPreferredFemaleVoice(
+    voices: SpeechSynthesisVoice[],
+    languageCode: string
+  ) {
+    const normalizedLanguage = languageCode.toLowerCase();
+    const baseLanguage = normalizedLanguage.split("-")[0];
+
+    const preferredFemaleNames = [
+      "Microsoft Neerja",
+      "Microsoft Heera",
+      "Microsoft Zira",
+      "Microsoft Hazel",
+      "Microsoft Susan",
+      "Microsoft Sonia",
+      "Google UK English Female",
+      "Google US English",
+      "Samantha",
+      "Karen",
+      "Moira",
+      "Tessa",
+      "Veena",
+      "Lekha",
+    ];
+
+    const languageVoices = voices.filter((voice) => {
+      const voiceLanguage = voice.lang.toLowerCase();
+
+      return (
+        voiceLanguage === normalizedLanguage ||
+        voiceLanguage.startsWith(`${baseLanguage}-`) ||
+        voiceLanguage === baseLanguage
+      );
+    });
+
+    for (const preferredName of preferredFemaleNames) {
+      const exactMatch = languageVoices.find((voice) =>
+        voice.name.toLowerCase().includes(preferredName.toLowerCase())
+      );
+
+      if (exactMatch) {
+        return exactMatch;
+      }
+    }
+
+    const femaleHintMatch = languageVoices.find((voice) => {
+      const name = voice.name.toLowerCase();
+
+      return [
+        "female",
+        "woman",
+        "neerja",
+        "heera",
+        "zira",
+        "hazel",
+        "susan",
+        "sonia",
+        "samantha",
+        "karen",
+        "moira",
+        "tessa",
+        "veena",
+        "lekha",
+      ].some((hint) => name.includes(hint));
+    });
+
+    if (femaleHintMatch) {
+      return femaleHintMatch;
+    }
+
+    return languageVoices[0] || voices[0] || null;
+  }
+
   function speak(text: string) {
     if (
       typeof window === "undefined" ||
@@ -407,12 +479,56 @@ export default function MiraPage() {
 
     window.speechSynthesis.cancel();
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = currentLanguage.speechCode;
-    utterance.rate = 1;
-    utterance.pitch = 1;
+    const speakWithAvailableVoices = () => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = getPreferredFemaleVoice(
+        voices,
+        currentLanguage.speechCode
+      );
 
-    window.speechSynthesis.speak(utterance);
+      utterance.lang = currentLanguage.speechCode;
+      utterance.rate = 0.98;
+      utterance.pitch = 1.08;
+
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+
+      window.speechSynthesis.speak(utterance);
+    };
+
+    const availableVoices = window.speechSynthesis.getVoices();
+
+    if (availableVoices.length > 0) {
+      speakWithAvailableVoices();
+      return;
+    }
+
+    const handleVoicesChanged = () => {
+      window.speechSynthesis.removeEventListener(
+        "voiceschanged",
+        handleVoicesChanged
+      );
+      speakWithAvailableVoices();
+    };
+
+    window.speechSynthesis.addEventListener(
+      "voiceschanged",
+      handleVoicesChanged,
+      { once: true }
+    );
+
+    window.setTimeout(() => {
+      window.speechSynthesis.removeEventListener(
+        "voiceschanged",
+        handleVoicesChanged
+      );
+
+      if (!window.speechSynthesis.speaking) {
+        speakWithAvailableVoices();
+      }
+    }, 500);
   }
 
   function stopSpeaking() {
