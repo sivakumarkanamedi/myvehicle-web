@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { supabase } from "../../supabase";
 import {
   FormEvent,
   useEffect,
@@ -251,6 +252,22 @@ function getIntentRoute(command: string) {
   }
 
   return null;
+}
+
+function getDirectActionReply(route: string): string {
+  if (route.startsWith("/documents")) return "Opening your Document Vault.";
+  if (route.startsWith("/challans")) return "Opening your challans.";
+  if (route.startsWith("/workshops")) return "Opening nearby workshops.";
+  if (route.startsWith("/service-history")) return "Opening your service history.";
+  if (route.startsWith("/service-booking")) return "Opening service booking.";
+  if (route.startsWith("/marketplace")) return "Opening the marketplace.";
+  if (route.startsWith("/reminders")) return "Opening your reminders.";
+  if (route.startsWith("/sos")) return "Opening emergency assistance.";
+  if (route.startsWith("/navigation/trip-planner")) return "Opening the trip planner.";
+  if (route.startsWith("/navigation")) return "Opening navigation.";
+  if (route === "/") return "Opening your vehicle dashboard.";
+
+  return "Opening that for you.";
 }
 
 export default function MiraPage() {
@@ -605,10 +622,55 @@ export default function MiraPage() {
     setVoiceError("");
 
     try {
+      // Simple My Vehicle actions should feel immediate.
+      // Mira confirms the action first, then opens the correct page.
+      // No AI/API call is needed for these straightforward commands.
+      const directRoute = getIntentRoute(message);
+
+      if (directRoute) {
+        const directReply = getDirectActionReply(directRoute);
+
+        setMessages((current) => [
+          ...current,
+          {
+            id: Date.now() + 1,
+            role: "assistant",
+            content: directReply,
+          },
+        ]);
+
+        if (autoSpeak) {
+          speak(directReply);
+        }
+
+        window.setTimeout(() => {
+          router.push(directRoute);
+        }, 2500);
+
+        return;
+      }
+
+      // For conversational or non-direct requests, use authenticated Mira AI.
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError) {
+        throw new Error("Unable to verify your login. Please sign in again.");
+      }
+
+      const accessToken = session?.access_token;
+
+      if (!accessToken) {
+        throw new Error("Please sign in to use Mira.");
+      }
+
       const response = await fetch("/api/mira", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
           message,
@@ -616,15 +678,16 @@ export default function MiraPage() {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error("Mira could not respond.");
-      }
-
-      const data = (await response.json()) as {
+      const data = (await response.json().catch(() => ({}))) as {
         reply?: string;
         output_text?: string;
         text?: string;
+        error?: string;
       };
+
+      if (!response.ok) {
+        throw new Error(data.error || "Mira could not respond.");
+      }
 
       const reply =
         data.reply ||
@@ -640,14 +703,6 @@ export default function MiraPage() {
           content: reply,
         },
       ]);
-
-      const route = getIntentRoute(message);
-
-      if (route) {
-        window.setTimeout(() => {
-          router.push(route);
-        }, 1200);
-      }
     } catch (caughtError) {
       const fallbackReply =
         caughtError instanceof Error
