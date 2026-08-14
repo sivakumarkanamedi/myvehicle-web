@@ -1484,13 +1484,10 @@ export default function MiraNavigationPage() {
     }, 120000);
   }
 
-  async function startLiveNavigation() {
+  function buildLiveNavigationHref() {
     if (!destinationCoordinates) {
-      setError("Select a destination first.");
-      return;
+      return "/navigation/live";
     }
-
-    setError("");
 
     const routeIndex =
       selectedRouteIndex ??
@@ -1506,7 +1503,17 @@ export default function MiraNavigationPage() {
       route: String(routeIndex),
     });
 
-    window.location.assign(`/navigation/live?${params.toString()}`);
+    return `/navigation/live?${params.toString()}`;
+  }
+
+  async function startLiveNavigation() {
+    if (!destinationCoordinates) {
+      setError("Select a destination first.");
+      return;
+    }
+
+    setError("");
+    window.location.assign(buildLiveNavigationHref());
   }
 
   function pauseOrResumeNavigation() {
@@ -1737,14 +1744,22 @@ export default function MiraNavigationPage() {
                   {loading ? "Finding routes…" : "Directions"}
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => void startLiveNavigation()}
-                  disabled={!origin}
-                  className="rounded-2xl bg-blue-500 px-5 py-3 text-sm font-black text-white transition hover:bg-blue-400 disabled:opacity-50"
-                >
-                  Start
-                </button>
+                {origin ? (
+                  <Link
+                    href={buildLiveNavigationHref()}
+                    className="rounded-2xl bg-blue-500 px-5 py-3 text-sm font-black text-white transition hover:bg-blue-400"
+                  >
+                    Start
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="rounded-2xl bg-blue-500 px-5 py-3 text-sm font-black text-white opacity-50"
+                  >
+                    Start
+                  </button>
+                )}
 
                 <button
                   type="button"
