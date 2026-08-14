@@ -1491,62 +1491,22 @@ export default function MiraNavigationPage() {
     }
 
     setError("");
-    destinationRef.current = destinationCoordinates;
 
-    try {
-      const position =
-        await new Promise<GeolocationPosition>(
-          (resolve, reject) => {
-            navigator.geolocation.getCurrentPosition(
-              resolve,
-              reject,
-              {
-                enableHighAccuracy: true,
-                timeout: 15000,
-                maximumAge: 3000,
-              }
-            );
-          }
-        );
+    const routeIndex =
+      selectedRouteIndex ??
+      result?.recommendation?.recommended_route_index ??
+      result?.routes?.[0]?.route_index ??
+      0;
 
-      const liveOrigin = {
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-      };
+    const params = new URLSearchParams({
+      destination: form.destinationName || "Destination",
+      address: form.destinationName || "Destination",
+      lat: String(destinationCoordinates.latitude),
+      lng: String(destinationCoordinates.longitude),
+      route: String(routeIndex),
+    });
 
-      currentLocationRef.current = liveOrigin;
-      setCurrentLocation(liveOrigin);
-      setOrigin(liveOrigin);
-      setDistanceRemainingMetres(
-        distanceBetweenMetres(
-          liveOrigin,
-          destinationCoordinates
-        )
-      );
-      setNavigationStatus("active");
-      const startMessage = `Navigation started to ${
-        form.destinationName || "your destination"
-      }. Mira will monitor traffic every two minutes.`;
-
-      setMiraNavigationMessage(startMessage);
-      speakNavigationMessage(startMessage, true);
-
-      // Open the route map and start live GPS immediately.
-      // Refresh traffic in the background so Start Navigation never feels stuck.
-      scrollToRouteMap();
-      beginLiveTracking();
-
-      void refreshTrafficDuringNavigation(
-        liveOrigin,
-        destinationCoordinates
-      );
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? caughtError.message
-          : "Unable to start live navigation."
-      );
-    }
+    window.location.assign(`/navigation/live?${params.toString()}`);
   }
 
   function pauseOrResumeNavigation() {
