@@ -13,9 +13,25 @@ type Coordinates = {
   longitude: number;
 };
 
+type CongestionLevel =
+  | "light"
+  | "moderate"
+  | "heavy"
+  | "severe";
+
+type TrafficSegment = {
+  encoded_polyline?: string | null;
+  congestion_level?: CongestionLevel | null;
+  level?: CongestionLevel | null;
+};
+
 type NavigationRoute = {
   route_index: number;
   encoded_polyline: string | null;
+  congestion?: {
+    overall_level?: CongestionLevel | null;
+  } | null;
+  traffic_segments?: TrafficSegment[] | null;
 };
 
 export type SelectedPlace = {
@@ -38,6 +54,18 @@ type MiraMapProps = {
   selectedRouteIndex?: number;
   heightClassName?: string;
   showPlaceSearch?: boolean;
+
+  /**
+   * Live-navigation mode keeps the map clean and avoids repeatedly fitting
+   * the whole route while GPS updates are coming in.
+   */
+  navigationMode?: boolean;
+
+  /**
+   * When true in navigationMode, the map follows the moving vehicle.
+   */
+  followCurrentLocation?: boolean;
+
   onPlaceSelected?: (place: SelectedPlace) => void;
   onMapReady?: () => void;
   onError?: (message: string) => void;
@@ -64,6 +92,8 @@ export default function MiraMap({
   selectedRouteIndex = 0,
   heightClassName = "h-[560px]",
   showPlaceSearch = true,
+  navigationMode = false,
+  followCurrentLocation = false,
   onPlaceSelected,
   onMapReady,
   onError,
@@ -88,6 +118,9 @@ export default function MiraMap({
 
   const autocompleteElementRef =
     useRef<any>(null);
+
+  const firstLiveFocusDoneRef =
+    useRef(false);
 
   const [loading, setLoading] =
     useState(true);
@@ -153,26 +186,33 @@ export default function MiraMap({
           new google.maps.Map(
             mapContainerRef.current,
             {
-              center:
-                initialCenter,
+              center: initialCenter,
               zoom:
-                currentLocation ||
-                destination
-                  ? 14
-                  : 11,
+                navigationMode
+                  ? 17
+                  : currentLocation ||
+                      destination
+                    ? 14
+                    : 11,
               mapId,
+
+              // Live mode should feel like a navigation cockpit,
+              // not like a generic Google Maps page.
               disableDefaultUI:
-                false,
-              mapTypeControl:
-                false,
-              streetViewControl:
-                false,
+                navigationMode,
+              mapTypeControl: false,
+              streetViewControl: false,
               fullscreenControl:
-                true,
+                !navigationMode,
               zoomControl:
-                true,
+                !navigationMode,
               gestureHandling:
                 "greedy",
+              clickableIcons: true,
+              keyboardShortcuts:
+                !navigationMode,
+              rotateControl:
+                navigationMode,
             }
           );
 
@@ -212,14 +252,28 @@ export default function MiraMap({
           routePolylinesRef
         );
 
-        fitMapToContent({
-          google,
-          map:
+        if (
+          navigationMode &&
+          currentLocation
+        ) {
+          focusLiveVehicle(
             mapRef.current,
-          currentLocation,
-          destination,
-          routes,
-        });
+            currentLocation,
+            true
+          );
+
+          firstLiveFocusDoneRef.current =
+            true;
+        } else {
+          fitMapToContent({
+            google,
+            map:
+              mapRef.current,
+            currentLocation,
+            destination,
+            routes,
+          });
+        }
 
         setLoading(false);
         onMapReady?.();
@@ -266,11 +320,14 @@ export default function MiraMap({
       }
 
       mapRef.current = null;
+      firstLiveFocusDoneRef.current =
+        false;
     };
   }, [
     apiKey,
     mapId,
     showPlaceSearch,
+    navigationMode,
   ]);
 
   useEffect(() => {
@@ -294,18 +351,39 @@ export default function MiraMap({
       destinationMarkerRef
     );
 
-    fitMapToContent({
-      google,
-      map:
+    if (
+      navigationMode &&
+      followCurrentLocation &&
+      currentLocation
+    ) {
+      focusLiveVehicle(
         mapRef.current,
-      currentLocation,
-      destination,
-      routes,
-    });
+        currentLocation,
+        !firstLiveFocusDoneRef.current
+      );
+
+      firstLiveFocusDoneRef.current =
+        true;
+
+      return;
+    }
+
+    if (!navigationMode) {
+      fitMapToContent({
+        google,
+        map:
+          mapRef.current,
+        currentLocation,
+        destination,
+        routes,
+      });
+    }
   }, [
     currentLocation,
     destination,
     destinationName,
+    navigationMode,
+    followCurrentLocation,
   ]);
 
   useEffect(() => {
@@ -327,17 +405,30 @@ export default function MiraMap({
       routePolylinesRef
     );
 
-    fitMapToContent({
-      google,
-      map:
+    if (!navigationMode) {
+      fitMapToContent({
+        google,
+        map:
+          mapRef.current,
+        currentLocation,
+        destination,
+        routes,
+      });
+    } else if (
+      currentLocation &&
+      followCurrentLocation
+    ) {
+      focusLiveVehicle(
         mapRef.current,
-      currentLocation,
-      destination,
-      routes,
-    });
+        currentLocation,
+        false
+      );
+    }
   }, [
     routes,
     selectedRouteIndex,
+    navigationMode,
+    followCurrentLocation,
   ]);
 
   function handleError(
@@ -348,7 +439,13 @@ export default function MiraMap({
   }
 
   return (
-    <section className="overflow-hidden rounded-3xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/20">
+    <section
+      className={
+        navigationMode
+          ? "relative overflow-hidden bg-slate-950"
+          : "overflow-hidden rounded-3xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/20"
+      }
+    >
       {showPlaceSearch ? (
         <div className="border-b border-white/10 bg-slate-900 p-4">
           <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -370,6 +467,14 @@ export default function MiraMap({
           className={`w-full ${heightClassName}`}
         />
 
+        {navigationMode ? (
+          <>
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-slate-950/15 via-transparent to-slate-950/20" />
+
+            <div className="pointer-events-none absolute bottom-6 left-1/2 h-44 w-44 -translate-x-1/2 rounded-full bg-cyan-400/5 blur-3xl" />
+          </>
+        ) : null}
+
         {loading ? (
           <div className="absolute inset-0 flex items-center justify-center bg-slate-950/90">
             <div className="text-center">
@@ -383,12 +488,13 @@ export default function MiraMap({
         ) : null}
 
         {error ? (
-          <div className="absolute inset-x-4 top-4 rounded-2xl border border-rose-400/30 bg-rose-950/95 px-4 py-3 text-sm text-rose-100 shadow-xl">
+          <div className="absolute inset-x-4 top-4 z-30 rounded-2xl border border-rose-400/30 bg-rose-950/95 px-4 py-3 text-sm text-rose-100 shadow-xl">
             {error}
           </div>
         ) : null}
 
-        {!loading &&
+        {!navigationMode &&
+        !loading &&
         !error &&
         selectedRoute ? (
           <div className="absolute bottom-4 left-4 rounded-2xl border border-cyan-400/30 bg-slate-950/90 px-4 py-3 text-sm shadow-xl backdrop-blur">
@@ -798,72 +904,152 @@ function updateMarkers(
   currentMarkerRef: MutableRefObject<any>,
   destinationMarkerRef: MutableRefObject<any>
 ) {
-  removeMarker(
-    currentMarkerRef.current
-  );
-
-  removeMarker(
-    destinationMarkerRef.current
-  );
-
-  currentMarkerRef.current =
-    null;
-
-  destinationMarkerRef.current =
-    null;
-
   const AdvancedMarkerElement =
     google.maps.marker
       .AdvancedMarkerElement;
 
-  const PinElement =
-    google.maps.marker.PinElement;
-
   if (currentLocation) {
-    const currentPin =
-      new PinElement({
-        background: "#22d3ee",
-        borderColor: "#0e7490",
-        glyphColor: "#082f49",
-        glyph: "●",
-        scale: 1.1,
-      });
+    if (!currentMarkerRef.current) {
+      currentMarkerRef.current =
+        new AdvancedMarkerElement({
+          map,
+          position:
+            toLatLng(
+              currentLocation
+            ),
+          title:
+            "Your vehicle",
+          content:
+            createVehicleMarker(),
+          zIndex: 100,
+        });
+    } else {
+      currentMarkerRef.current.position =
+        toLatLng(
+          currentLocation
+        );
+
+      currentMarkerRef.current.map =
+        map;
+    }
+  } else if (
+    currentMarkerRef.current
+  ) {
+    removeMarker(
+      currentMarkerRef.current
+    );
 
     currentMarkerRef.current =
-      new AdvancedMarkerElement({
-        map,
-        position:
-          toLatLng(
-            currentLocation
-          ),
-        title:
-          "Current location",
-        content:
-          currentPin.element,
-      });
+      null;
   }
 
   if (destination) {
-    const destinationPin =
-      new PinElement({
-        background: "#fb7185",
-        borderColor: "#9f1239",
-        glyphColor: "#4c0519",
-        glyph: "D",
-        scale: 1.1,
-      });
+    if (!destinationMarkerRef.current) {
+      destinationMarkerRef.current =
+        new AdvancedMarkerElement({
+          map,
+          position:
+            toLatLng(destination),
+          title:
+            destinationName,
+          content:
+            createDestinationMarker(),
+          zIndex: 90,
+        });
+    } else {
+      destinationMarkerRef.current.position =
+        toLatLng(destination);
+
+      destinationMarkerRef.current.title =
+        destinationName;
+
+      destinationMarkerRef.current.map =
+        map;
+    }
+  } else if (
+    destinationMarkerRef.current
+  ) {
+    removeMarker(
+      destinationMarkerRef.current
+    );
 
     destinationMarkerRef.current =
-      new AdvancedMarkerElement({
-        map,
-        position:
-          toLatLng(destination),
-        title:
-          destinationName,
-        content:
-          destinationPin.element,
-      });
+      null;
   }
+}
+
+function createVehicleMarker() {
+  const root =
+    document.createElement("div");
+
+  root.style.width = "54px";
+  root.style.height = "54px";
+  root.style.borderRadius = "9999px";
+  root.style.display = "grid";
+  root.style.placeItems = "center";
+  root.style.background =
+    "radial-gradient(circle at 50% 45%, rgba(34,211,238,.34), rgba(37,99,235,.20) 50%, rgba(2,6,23,.94) 72%)";
+  root.style.border =
+    "2px solid rgba(103,232,249,.92)";
+  root.style.boxShadow =
+    "0 0 0 5px rgba(34,211,238,.12), 0 0 26px rgba(34,211,238,.75), 0 8px 30px rgba(2,6,23,.70)";
+  root.style.color = "#ffffff";
+  root.style.fontSize = "27px";
+  root.style.lineHeight = "1";
+  root.style.userSelect = "none";
+  root.style.transition =
+    "transform 220ms ease, filter 220ms ease";
+  root.style.filter =
+    "drop-shadow(0 0 7px rgba(34,211,238,.75))";
+
+  const car =
+    document.createElement("span");
+
+  car.textContent = "🚘";
+  car.style.transform =
+    "translateY(-1px)";
+  car.style.display = "block";
+
+  root.appendChild(car);
+
+  return root;
+}
+
+function createDestinationMarker() {
+  const root =
+    document.createElement("div");
+
+  root.style.width = "34px";
+  root.style.height = "42px";
+  root.style.position = "relative";
+  root.style.display = "grid";
+  root.style.placeItems = "center";
+  root.style.borderRadius =
+    "18px 18px 18px 4px";
+  root.style.transform =
+    "rotate(-45deg)";
+  root.style.background =
+    "linear-gradient(135deg,#fb7185,#ef4444)";
+  root.style.border =
+    "2px solid rgba(255,255,255,.9)";
+  root.style.boxShadow =
+    "0 0 22px rgba(244,63,94,.62), 0 8px 20px rgba(2,6,23,.55)";
+
+  const dot =
+    document.createElement("span");
+
+  dot.style.width = "10px";
+  dot.style.height = "10px";
+  dot.style.borderRadius =
+    "9999px";
+  dot.style.background = "#ffffff";
+  dot.style.transform =
+    "rotate(45deg)";
+  dot.style.display = "block";
+
+  root.appendChild(dot);
+
+  return root;
 }
 
 function drawRoutes(
@@ -901,36 +1087,232 @@ function drawRoutes(
       continue;
     }
 
+    const path =
+      decodePath(
+        route.encoded_polyline
+      );
+
     const selected =
       route.route_index ===
       selectedRouteIndex;
 
-    const polyline =
+    if (!selected) {
+      const alternative =
+        new google.maps.Polyline({
+          map,
+          path,
+          geodesic: true,
+          strokeColor:
+            "#64748b",
+          strokeOpacity:
+            0.42,
+          strokeWeight:
+            5,
+          zIndex:
+            8,
+          clickable: true,
+        });
+
+      routePolylinesRef.current.push(
+        alternative
+      );
+
+      continue;
+    }
+
+    const congestionLevel =
+      route.congestion
+        ?.overall_level ??
+      "light";
+
+    const routeColor =
+      congestionColor(
+        congestionLevel
+      );
+
+    // Outer neon halo.
+    const glow =
       new google.maps.Polyline({
         map,
-        path:
-          decodePath(
-            route.encoded_polyline
-          ),
+        path,
         geodesic: true,
         strokeColor:
-          selected
-            ? "#06b6d4"
-            : "#64748b",
+          routeColor,
         strokeOpacity:
-          selected
-            ? 0.95
-            : 0.55,
+          0.18,
         strokeWeight:
-          selected ? 7 : 5,
+          22,
         zIndex:
-          selected ? 20 : 10,
+          18,
+        clickable: false,
+      });
+
+    // Mid glow adds the premium "Mira energy route" look.
+    const midGlow =
+      new google.maps.Polyline({
+        map,
+        path,
+        geodesic: true,
+        strokeColor:
+          routeColor,
+        strokeOpacity:
+          0.35,
+        strokeWeight:
+          14,
+        zIndex:
+          19,
+        clickable: false,
+      });
+
+    // Main selected route.
+    const main =
+      new google.maps.Polyline({
+        map,
+        path,
+        geodesic: true,
+        strokeColor:
+          routeColor,
+        strokeOpacity:
+          1,
+        strokeWeight:
+          8,
+        zIndex:
+          20,
         clickable: true,
       });
 
+    // Directional motion cues.
+    const arrows =
+      new google.maps.Polyline({
+        map,
+        path,
+        geodesic: true,
+        strokeOpacity: 0,
+        zIndex: 21,
+        clickable: false,
+        icons: [
+          {
+            icon: {
+              path:
+                google.maps.SymbolPath
+                  .FORWARD_CLOSED_ARROW,
+              scale: 2.2,
+              strokeColor:
+                "#ffffff",
+              strokeOpacity:
+                0.90,
+              strokeWeight: 1.3,
+              fillColor:
+                routeColor,
+              fillOpacity: 1,
+            },
+            offset: "10%",
+            repeat: "110px",
+          },
+        ],
+      });
+
     routePolylinesRef.current.push(
-      polyline
+      glow,
+      midGlow,
+      main,
+      arrows
     );
+
+    // If the backend later supplies genuine traffic-segment polylines,
+    // this overlays them without inventing traffic information.
+    if (
+      Array.isArray(
+        route.traffic_segments
+      )
+    ) {
+      for (
+        const segment of
+        route.traffic_segments
+      ) {
+        if (
+          !segment
+            ?.encoded_polyline
+        ) {
+          continue;
+        }
+
+        const segmentLevel =
+          segment.congestion_level ??
+          segment.level ??
+          congestionLevel;
+
+        const segmentPolyline =
+          new google.maps.Polyline({
+            map,
+            path:
+              decodePath(
+                segment
+                  .encoded_polyline
+              ),
+            geodesic: true,
+            strokeColor:
+              congestionColor(
+                segmentLevel
+              ),
+            strokeOpacity:
+              1,
+            strokeWeight:
+              9,
+            zIndex:
+              24,
+            clickable: false,
+          });
+
+        routePolylinesRef.current.push(
+          segmentPolyline
+        );
+      }
+    }
+  }
+}
+
+function congestionColor(
+  level: CongestionLevel
+) {
+  switch (level) {
+    case "moderate":
+      return "#facc15";
+    case "heavy":
+      return "#fb923c";
+    case "severe":
+      return "#f43f5e";
+    case "light":
+    default:
+      return "#22d3ee";
+  }
+}
+
+function focusLiveVehicle(
+  map: any,
+  currentLocation: Coordinates,
+  initial: boolean
+) {
+  const position =
+    toLatLng(currentLocation);
+
+  if (initial) {
+    map.setCenter(position);
+    map.setZoom(17);
+
+    return;
+  }
+
+  map.panTo(position);
+
+  const zoom =
+    Number(map.getZoom?.());
+
+  if (
+    !Number.isFinite(zoom) ||
+    zoom < 16
+  ) {
+    map.setZoom(17);
   }
 }
 
@@ -1037,7 +1419,10 @@ function fitMapToContent(args: {
 function clearPolylines(
   routePolylinesRef: MutableRefObject<any[]>
 ) {
-  for (const polyline of routePolylinesRef.current) {
+  for (
+    const polyline of
+    routePolylinesRef.current
+  ) {
     polyline.setMap(null);
   }
 

@@ -528,6 +528,8 @@ export default function LiveNavigationPage() {
             selectedRouteIndex={
               selectedRouteIndex
             }
+            navigationMode
+            followCurrentLocation={followVehicle}
             onPlaceSelected={(place) => {
               if (status !== "idle") return;
               setDestination(place);
