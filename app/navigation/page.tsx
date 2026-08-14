@@ -1395,12 +1395,15 @@ export default function MiraNavigationPage() {
       setMiraNavigationMessage(startMessage);
       speakNavigationMessage(startMessage, true);
 
-      await refreshTrafficDuringNavigation(
+      // Open the route map and start live GPS immediately.
+      // Refresh traffic in the background so Start Navigation never feels stuck.
+      scrollToRouteMap();
+      beginLiveTracking();
+
+      void refreshTrafficDuringNavigation(
         liveOrigin,
         destinationCoordinates
       );
-      beginLiveTracking();
-      scrollToRouteMap();
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
