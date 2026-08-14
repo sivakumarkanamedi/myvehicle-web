@@ -300,6 +300,7 @@ export default function MiraNavigationPage() {
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
   );
+  const mapSectionRef = useRef<HTMLElement | null>(null);
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const routePolylinesRef = useRef<any[]>([]);
@@ -558,6 +559,17 @@ export default function MiraNavigationPage() {
     }, 250);
   }
 
+  function scrollToRouteMap() {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        mapSectionRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 120);
+    });
+  }
+
   async function selectPlaceSuggestion(
     suggestion: PlaceSuggestion
   ) {
@@ -606,6 +618,10 @@ export default function MiraNavigationPage() {
 
       autocompleteSessionRef.current =
         new AutocompleteSessionToken();
+
+      if (origin) {
+        await runTrafficAnalysis({ latitude, longitude });
+      }
     } catch (caughtError) {
       setPlacesError(
         caughtError instanceof Error
@@ -840,19 +856,15 @@ export default function MiraNavigationPage() {
     }
   }
 
-  async function analyseTraffic(
-    event: FormEvent<HTMLFormElement>
+  async function runTrafficAnalysis(
+    destinationOverride?: Coordinates
   ) {
-    event.preventDefault();
+    const destination =
+      destinationOverride ?? destinationCoordinates;
 
-    if (
-      !canSubmit ||
-      loading ||
-      !origin ||
-      !destinationCoordinates
-    ) {
+    if (!origin || !destination || loading) {
       setError(
-        "Select a destination from the search suggestions before analysing the route."
+        "Use your current location and select a destination before analysing the route."
       );
       return;
     }
@@ -887,7 +899,7 @@ export default function MiraNavigationPage() {
           },
           body: JSON.stringify({
             origin,
-            destination: destinationCoordinates,
+            destination,
             planned_departure_time:
               form.departureTime || null,
             avoid_tolls: form.avoidTolls,
@@ -919,6 +931,7 @@ export default function MiraNavigationPage() {
           data.routes?.[0]?.route_index ??
           null
       );
+      scrollToRouteMap();
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -928,6 +941,13 @@ export default function MiraNavigationPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function analyseTraffic(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+    await runTrafficAnalysis();
   }
 
   function speakNavigationMessage(
@@ -1380,6 +1400,7 @@ export default function MiraNavigationPage() {
         destinationCoordinates
       );
       beginLiveTracking();
+      scrollToRouteMap();
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -1907,7 +1928,10 @@ export default function MiraNavigationPage() {
           </section>
         ) : null}
 
-        <section className="overflow-hidden rounded-3xl border border-white/10 bg-slate-900/80">
+        <section
+          ref={mapSectionRef}
+          className="scroll-mt-6 overflow-hidden rounded-3xl border border-white/10 bg-slate-900/80"
+        >
           <div className="flex flex-col gap-3 border-b border-white/10 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
