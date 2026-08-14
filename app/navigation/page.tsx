@@ -296,6 +296,9 @@ export default function MiraNavigationPage() {
   const [searchingPlaces, setSearchingPlaces] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [placesError, setPlacesError] = useState("");
+  const [locationIssue, setLocationIssue] = useState("");
+  const [showRouteOptions, setShowRouteOptions] = useState(false);
+  const [activeVehicleLabel, setActiveVehicleLabel] = useState("Auto vehicle");
   const autocompleteSessionRef = useRef<any>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
@@ -393,6 +396,12 @@ export default function MiraNavigationPage() {
         sosTimerRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void detectCurrentLocation(true);
+    void loadActiveVehicleType();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -717,6 +726,11 @@ export default function MiraNavigationPage() {
           fontSize: "18px",
         },
       });
+
+      if (!result?.routes?.length) {
+        mapRef.current.panTo(originPosition);
+        mapRef.current.setZoom(14);
+      }
     }
 
     if (destinationCoordinates) {
@@ -816,9 +830,9 @@ export default function MiraNavigationPage() {
   const canSubmit =
     origin !== null && destinationCoordinates !== null;
 
-  async function detectCurrentLocation() {
+  async function detectCurrentLocation(silent = false) {
     setLocating(true);
-    setError("");
+    setLocationIssue("");
 
     try {
       if (!navigator.geolocation) {
@@ -841,19 +855,141 @@ export default function MiraNavigationPage() {
         }
       );
 
-      setOrigin({
+      const nextOrigin = {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
-      });
+      };
+
+      setOrigin(nextOrigin);
+      currentLocationRef.current = nextOrigin;
+      setCurrentLocation(nextOrigin);
+      setLocationIssue("");
     } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? caughtError.message
-          : "Unable to detect current location."
+      const geoError =
+        typeof GeolocationPositionError !== "undefined" &&
+        caughtError instanceof GeolocationPositionError
+          ? caughtError
+          : null;
+
+      const denied =
+        geoError?.code === geoError?.PERMISSION_DENIED ||
+        (caughtError instanceof Error &&
+          /permission|denied/i.test(caughtError.message));
+
+      setLocationIssue(
+        denied
+          ? "Location access is off. Enable location permission to use live navigation."
+          : "Current location could not be detected. Tap Retry Location."
       );
+
+      if (!silent && !denied) {
+        setError(
+          caughtError instanceof Error
+            ? caughtError.message
+            : "Unable to detect current location."
+        );
+      }
     } finally {
       setLocating(false);
     }
+  }
+
+  async function loadActiveVehicleType() {
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) return;
+
+      const storedId =
+        typeof window !== "undefined"
+          ? window.localStorage.getItem("myvehicle.activeVehicleId")
+          : null;
+
+      let query = supabase
+        .from("vehicles")
+        .select("id, vehicle_number, vehicle_type")
+        .eq("user_id", user.id);
+
+      if (storedId) {
+        query = query.eq("id", Number(storedId));
+      } else {
+        query = query.order("id", { ascending: true }).limit(1);
+      }
+
+      const { data, error: vehicleError } = await query.maybeSingle();
+
+      if (vehicleError || !data) return;
+
+      const rawType = String(data.vehicle_type || "").toLowerCase();
+      const navigationType: NavigationForm["vehicleType"] =
+        /bike|motorcycle|scooter|two.?wheeler/.test(rawType)
+          ? "two_wheeler"
+          : "car";
+
+      updateField("vehicleType", navigationType);
+      setActiveVehicleLabel(
+        `${data.vehicle_number || "Active vehicle"} · ${
+          navigationType === "two_wheeler" ? "Two Wheeler" : "Car"
+        }`
+      );
+    } catch {
+      // Navigation can safely continue with the default car profile.
+    }
+  }
+
+  async function shareDestination() {
+    if (!destinationCoordinates) return;
+
+    const shareUrl =
+      `https://www.google.com/maps/search/?api=1&query=` +
+      encodeURIComponent(
+        `${destinationCoordinates.latitude},${destinationCoordinates.longitude}`
+      );
+
+    const shareData = {
+      title: form.destinationName || "My Vehicle destination",
+      text: form.destinationName || "Navigation destination",
+      url: shareUrl,
+    };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+      } else {
+        await navigator.clipboard.writeText(shareUrl);
+        setMiraNavigationMessage("Destination link copied.");
+      }
+    } catch {
+      // User may dismiss the native share sheet; no error is necessary.
+    }
+  }
+
+  function saveDestination() {
+    if (!destinationCoordinates || typeof window === "undefined") return;
+
+    const saved = JSON.parse(
+      window.localStorage.getItem("myvehicle.savedDestinations") || "[]"
+    );
+
+    const next = [
+      {
+        name: form.destinationName || "Saved destination",
+        latitude: destinationCoordinates.latitude,
+        longitude: destinationCoordinates.longitude,
+        savedAt: new Date().toISOString(),
+      },
+      ...saved.filter(
+        (item: any) => item?.name !== form.destinationName
+      ),
+    ].slice(0, 20);
+
+    window.localStorage.setItem(
+      "myvehicle.savedDestinations",
+      JSON.stringify(next)
+    );
+    setMiraNavigationMessage("Destination saved.");
   }
 
   async function runTrafficAnalysis(
@@ -1538,105 +1674,58 @@ export default function MiraNavigationPage() {
           </div>
         ) : null}
 
-        <section className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
+        <section className="overflow-hidden rounded-3xl border border-white/10 bg-slate-900/80 shadow-2xl">
           <form
             onSubmit={analyseTraffic}
-            className="space-y-6 rounded-3xl border border-white/10 bg-slate-900/80 p-5 sm:p-6"
+            className="border-b border-white/10 p-4 sm:p-5"
           >
-            <div>
-              <h2 className="text-xl font-bold">
-                Plan your route
-              </h2>
-
-              <p className="mt-1 text-sm text-slate-500">
-                Use your current location and search for a destination.
-                Coordinates are filled automatically after selection.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => void detectCurrentLocation()}
-              disabled={locating}
-              className="w-full rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-5 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-400/20 disabled:opacity-50"
-            >
-              {locating
-                ? "Detecting location..."
-                : origin
-                  ? "Current location detected"
-                  : "Use my current location"}
-            </button>
-
-            {origin ? (
-              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4 text-sm text-slate-400">
-                <p>
-                  Latitude: {origin.latitude.toFixed(6)}
-                </p>
-                <p className="mt-1">
-                  Longitude: {origin.longitude.toFixed(6)}
-                </p>
-              </div>
-            ) : null}
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="relative sm:col-span-2">
-                <label className="block">
-                  <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Destination
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
+              <div className="relative min-w-0 flex-1">
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-500">
+                    🔎
                   </span>
+                  <input
+                    value={form.destinationName}
+                    placeholder="Where do you want to go?"
+                    autoComplete="off"
+                    onFocus={() =>
+                      setShowSuggestions(placeSuggestions.length > 0)
+                    }
+                    onBlur={() => {
+                      window.setTimeout(
+                        () => setShowSuggestions(false),
+                        180
+                      );
+                    }}
+                    onChange={(event) =>
+                      handleDestinationNameChange(event.target.value)
+                    }
+                    className="w-full rounded-2xl border border-white/10 bg-slate-950/80 py-4 pl-11 pr-24 text-base font-semibold outline-none transition placeholder:text-slate-600 focus:border-cyan-400/50"
+                  />
 
-                  <div className="relative">
-                    <input
-                      value={form.destinationName}
-                      placeholder="Search Marathahalli, airport, hospital or any place"
-                      autoComplete="off"
-                      onFocus={() =>
-                        setShowSuggestions(
-                          placeSuggestions.length > 0
-                        )
-                      }
-                      onBlur={() => {
-                        window.setTimeout(
-                          () => setShowSuggestions(false),
-                          180
-                        );
-                      }}
-                      onChange={(event) =>
-                        handleDestinationNameChange(
-                          event.target.value
-                        )
-                      }
-                      className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 pr-24 text-sm outline-none transition placeholder:text-slate-600 focus:border-cyan-400/50"
-                    />
-
-                    {searchingPlaces ? (
-                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-cyan-300">
-                        Searching…
-                      </span>
-                    ) : null}
-                  </div>
-                </label>
+                  {searchingPlaces ? (
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-cyan-300">
+                      Searching…
+                    </span>
+                  ) : null}
+                </div>
 
                 {showSuggestions ? (
-                  <div className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-30 overflow-hidden rounded-2xl border border-white/10 bg-slate-900 p-2 shadow-2xl">
+                  <div className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-2xl border border-white/10 bg-slate-900 p-2 shadow-2xl">
                     {placeSuggestions.map((suggestion) => (
                       <button
                         key={suggestion.placeId}
                         type="button"
-                        onMouseDown={(event) =>
-                          event.preventDefault()
-                        }
+                        onMouseDown={(event) => event.preventDefault()}
                         onClick={() =>
-                          void selectPlaceSuggestion(
-                            suggestion
-                          )
+                          void selectPlaceSuggestion(suggestion)
                         }
                         className="block w-full rounded-xl px-4 py-3 text-left transition hover:bg-white/[0.06]"
                       >
                         <span className="block text-sm font-bold text-white">
                           {suggestion.mainText}
                         </span>
-
                         {suggestion.secondaryText ? (
                           <span className="mt-1 block text-xs text-slate-500">
                             {suggestion.secondaryText}
@@ -1652,115 +1741,170 @@ export default function MiraNavigationPage() {
                     {placesError}
                   </p>
                 ) : null}
-
-                {destinationCoordinates ? (
-                  <div className="mt-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-xs text-emerald-100">
-                    Destination selected ·{" "}
-                    {destinationCoordinates.latitude.toFixed(6)},{" "}
-                    {destinationCoordinates.longitude.toFixed(6)}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-xs text-slate-600">
-                    Select a suggestion so Mira can obtain the
-                    destination coordinates automatically.
-                  </p>
-                )}
               </div>
 
-              <Field
-                label="Departure time"
-                value={form.departureTime}
-                type="datetime-local"
-                onChange={(value) =>
-                  updateField("departureTime", value)
-                }
-              />
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <span className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-xs font-semibold text-slate-300">
+                  🚘 {activeVehicleLabel}
+                </span>
 
-              <SelectField
-                label="Vehicle type"
-                value={form.vehicleType}
-                options={[
-                  ["car", "Car"],
-                  ["two_wheeler", "Two Wheeler"],
-                ]}
-                onChange={(value) =>
-                  updateField(
-                    "vehicleType",
-                    value as NavigationForm["vehicleType"]
-                  )
-                }
-              />
+                {locationIssue ? (
+                  <button
+                    type="button"
+                    onClick={() => void detectCurrentLocation(false)}
+                    disabled={locating}
+                    className="rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-xs font-bold text-amber-200"
+                  >
+                    {locating ? "Detecting…" : "Retry Location"}
+                  </button>
+                ) : null}
+              </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <ToggleField
-                label="Avoid tolls"
-                checked={form.avoidTolls}
-                onChange={(value) =>
-                  updateField("avoidTolls", value)
-                }
-              />
+            {locationIssue ? (
+              <p className="mt-3 rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                {locationIssue}
+              </p>
+            ) : null}
 
-              <ToggleField
-                label="Avoid highways"
-                checked={form.avoidHighways}
-                onChange={(value) =>
-                  updateField("avoidHighways", value)
-                }
-              />
+            {destinationCoordinates ? (
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={!canSubmit || loading}
+                  className="rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-300 disabled:opacity-50"
+                >
+                  {loading ? "Finding routes…" : "Directions"}
+                </button>
 
-              <ToggleField
-                label="Avoid ferries"
-                checked={form.avoidFerries}
-                onChange={(value) =>
-                  updateField("avoidFerries", value)
-                }
-              />
+                <button
+                  type="button"
+                  onClick={() => void startLiveNavigation()}
+                  disabled={!origin}
+                  className="rounded-2xl bg-blue-500 px-5 py-3 text-sm font-black text-white transition hover:bg-blue-400 disabled:opacity-50"
+                >
+                  Start
+                </button>
 
-              <ToggleField
-                label="Allow narrow shortcuts"
-                checked={form.allowNarrowShortcuts}
-                onChange={(value) =>
-                  updateField(
-                    "allowNarrowShortcuts",
-                    value
-                  )
-                }
-              />
-            </div>
+                <button
+                  type="button"
+                  onClick={() => void shareDestination()}
+                  className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm font-bold text-slate-200"
+                >
+                  Share
+                </button>
 
-            <button
-              type="submit"
-              disabled={!canSubmit || loading}
-              className="w-full rounded-2xl bg-cyan-400 px-6 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {loading
-                ? "Analysing traffic..."
-                : "Analyse routes with Mira"}
-            </button>
+                <button
+                  type="button"
+                  onClick={saveDestination}
+                  className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm font-bold text-slate-200"
+                >
+                  Save
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowRouteOptions((current) => !current)}
+                  className="rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm font-bold text-slate-200"
+                >
+                  More
+                </button>
+              </div>
+            ) : null}
+
+            {showRouteOptions ? (
+              <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/50 p-3">
+                <span className="mr-1 text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Route options
+                </span>
+                <CompactToggle
+                  label="Avoid tolls"
+                  checked={form.avoidTolls}
+                  onChange={(value) => updateField("avoidTolls", value)}
+                />
+                <CompactToggle
+                  label="Avoid highways"
+                  checked={form.avoidHighways}
+                  onChange={(value) => updateField("avoidHighways", value)}
+                />
+                <CompactToggle
+                  label="Avoid ferries"
+                  checked={form.avoidFerries}
+                  onChange={(value) => updateField("avoidFerries", value)}
+                />
+                <CompactToggle
+                  label="Narrow shortcuts"
+                  checked={form.allowNarrowShortcuts}
+                  onChange={(value) =>
+                    updateField("allowNarrowShortcuts", value)
+                  }
+                />
+                <label className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold text-slate-300">
+                  <span>Leave at</span>
+                  <input
+                    type="datetime-local"
+                    value={form.departureTime}
+                    onChange={(event) =>
+                      updateField("departureTime", event.target.value)
+                    }
+                    className="max-w-[170px] bg-transparent text-xs text-white outline-none"
+                  />
+                </label>
+              </div>
+            ) : null}
           </form>
 
-          <section className="rounded-3xl border border-white/10 bg-slate-900/80 p-5 sm:p-6">
-            {!result ? (
-              <EmptyRouteState />
-            ) : (
-              <TrafficResult
-                result={result}
-                origin={origin}
-                destination={destinationCoordinates}
-                destinationName={form.destinationName}
-                selectedRouteIndex={selectedRouteIndex}
-                onSelectRoute={setSelectedRouteIndex}
-                onStartNavigation={() =>
-                  void startLiveNavigation()
-                }
-                onOpenExternalNavigation={
-                  openExternalNavigation
-                }
-              />
-            )}
+          <section
+            ref={mapSectionRef}
+            className="relative min-h-[560px]"
+          >
+            <div
+              ref={mapElementRef}
+              className="absolute inset-0"
+            />
+
+            {!placesReady ? (
+              <div className="absolute inset-0 grid place-items-center bg-slate-950">
+                <div className="text-center">
+                  <div className="mx-auto h-9 w-9 animate-spin rounded-full border-4 border-cyan-400/20 border-t-cyan-300" />
+                  <p className="mt-4 text-sm text-slate-400">
+                    Loading map…
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {selectedRouteIndex !== null ? (
+              <div className="absolute right-4 top-4 rounded-full border border-blue-400/30 bg-slate-950/90 px-3 py-2 text-xs font-bold text-blue-200 shadow-xl backdrop-blur">
+                Route {selectedRouteIndex + 1}
+              </div>
+            ) : null}
+
+            {result &&
+            !(result.routes ?? []).some(
+              (route) => route.encoded_polyline
+            ) ? (
+              <div className="absolute bottom-4 left-4 right-4 rounded-2xl border border-amber-400/25 bg-slate-950/95 p-4 text-sm text-amber-100 shadow-2xl backdrop-blur-xl">
+                Route details are available, but route drawing data was not returned.
+              </div>
+            ) : null}
           </section>
         </section>
+
+        {result ? (
+          <section className="rounded-3xl border border-white/10 bg-slate-900/80 p-5 sm:p-6">
+            <TrafficResult
+              result={result}
+              origin={origin}
+              destination={destinationCoordinates}
+              destinationName={form.destinationName}
+              selectedRouteIndex={selectedRouteIndex}
+              onSelectRoute={setSelectedRouteIndex}
+              onStartNavigation={() => void startLiveNavigation()}
+              onOpenExternalNavigation={openExternalNavigation}
+            />
+          </section>
+        ) : null}
 
         {navigationStatus !== "idle" ? (
           <section className="rounded-3xl border border-blue-400/20 bg-gradient-to-br from-blue-950/60 via-slate-900 to-slate-950 p-5 shadow-2xl sm:p-6">
@@ -1930,60 +2074,6 @@ export default function MiraNavigationPage() {
             </p>
           </section>
         ) : null}
-
-        <section
-          ref={mapSectionRef}
-          className="scroll-mt-6 overflow-hidden rounded-3xl border border-white/10 bg-slate-900/80"
-        >
-          <div className="flex flex-col gap-3 border-b border-white/10 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
-                Interactive Route Map
-              </p>
-              <h2 className="mt-2 text-xl font-bold">
-                Live route preview
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                Recommended route is highlighted. Select another route
-                from the map or route cards to compare it.
-              </p>
-            </div>
-
-            {selectedRouteIndex !== null ? (
-              <span className="w-fit rounded-full border border-blue-400/30 bg-blue-400/10 px-3 py-1.5 text-xs font-semibold text-blue-200">
-                Route {selectedRouteIndex + 1} selected
-              </span>
-            ) : null}
-          </div>
-
-          <div className="relative min-h-[520px]">
-            <div
-              ref={mapElementRef}
-              className="absolute inset-0"
-            />
-
-            {!placesReady ? (
-              <div className="absolute inset-0 grid place-items-center bg-slate-950">
-                <div className="text-center">
-                  <div className="mx-auto h-9 w-9 animate-spin rounded-full border-4 border-cyan-400/20 border-t-cyan-300" />
-                  <p className="mt-4 text-sm text-slate-400">
-                    Loading interactive map…
-                  </p>
-                </div>
-              </div>
-            ) : null}
-
-            {result &&
-            !(result.routes ?? []).some(
-              (route) => route.encoded_polyline
-            ) ? (
-              <div className="absolute bottom-4 left-4 right-4 rounded-2xl border border-amber-400/25 bg-slate-950/95 p-4 text-sm text-amber-100 shadow-2xl backdrop-blur-xl">
-                Route details are available, but your traffic API did
-                not return encoded polylines for drawing the routes.
-              </div>
-            ) : null}
-          </div>
-        </section>
 
         <section className="rounded-3xl border border-rose-400/25 bg-gradient-to-br from-rose-950/70 via-slate-900 to-slate-950 p-5 shadow-2xl sm:p-6">
           <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
@@ -2268,33 +2358,6 @@ function TrafficResult(props: {
         />
       </div>
 
-      <div className="mt-5 flex flex-wrap gap-3">
-        <button
-          type="button"
-          onClick={props.onStartNavigation}
-          disabled={!props.origin || !props.destination}
-          className="rounded-2xl bg-cyan-400 px-5 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Start Navigation
-        </button>
-
-        <button
-          type="button"
-          onClick={props.onOpenExternalNavigation}
-          disabled={!props.origin || !props.destination}
-          className="rounded-2xl border border-white/10 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/30 disabled:opacity-50"
-        >
-          Open Google Maps
-        </button>
-
-        <Link
-          href="/mira"
-          className="rounded-2xl border border-white/10 bg-slate-950/60 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:border-cyan-400/30"
-        >
-          Ask Mira About This Route
-        </Link>
-      </div>
-
       <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/60 p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -2511,6 +2574,30 @@ function SelectField(props: {
           </option>
         ))}
       </select>
+    </label>
+  );
+}
+
+function CompactToggle(props: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label
+      className={`flex cursor-pointer items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold transition ${
+        props.checked
+          ? "border-cyan-400/30 bg-cyan-400/10 text-cyan-100"
+          : "border-white/10 bg-white/[0.04] text-slate-400"
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={props.checked}
+        onChange={(event) => props.onChange(event.target.checked)}
+        className="h-3.5 w-3.5 accent-cyan-400"
+      />
+      {props.label}
     </label>
   );
 }
