@@ -1496,7 +1496,7 @@ export default function MiraNavigationPage() {
       0;
 
     const params = new URLSearchParams({
-      destination: form.destinationName || "Destination",
+      name: form.destinationName || "Destination",
       address: form.destinationName || "Destination",
       lat: String(destinationCoordinates.latitude),
       lng: String(destinationCoordinates.longitude),
