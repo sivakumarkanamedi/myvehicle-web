@@ -405,7 +405,7 @@ export default function MiraMap({
       routePolylinesRef
     );
 
-    if (!navigationMode) {
+    if (!navigationMode || !followCurrentLocation) {
       fitMapToContent({
         google,
         map:

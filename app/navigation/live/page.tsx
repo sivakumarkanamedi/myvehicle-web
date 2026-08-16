@@ -505,7 +505,8 @@ export default function LiveNavigationPage() {
   }
 
   function openAskMira() {
-    router.push("/navigation/codriver");
+    setShowMiraPanel(true);
+    setMessage("Mira is ready. Ask for route, traffic, parking, fuel or safety help while navigation stays active.");
   }
 
   function openEmergency() {
@@ -898,9 +899,10 @@ export default function LiveNavigationPage() {
                   <QuickButton
                     label="Route"
                     icon="🧭"
-                    onClick={() =>
-                      setShowMiraPanel(true)
-                    }
+                    onClick={() => {
+                      setFollowVehicle(false);
+                      setMessage("Showing the complete selected route.");
+                    }}
                   />
                 </div>
               </CockpitCard>
