@@ -232,6 +232,19 @@ export default function LiveNavigationPage() {
   }, []);
 
   useEffect(() => {
+    if (!currentLocation || typeof window === "undefined") return;
+
+    window.localStorage.setItem(
+      "myvehicle:last-navigation-location",
+      JSON.stringify({
+        latitude: currentLocation.latitude,
+        longitude: currentLocation.longitude,
+        capturedAt: new Date().toISOString(),
+      })
+    );
+  }, [currentLocation]);
+
+  useEffect(() => {
     if (
       destination &&
       currentLocation &&
@@ -577,7 +590,19 @@ export default function LiveNavigationPage() {
   }
 
   function openEmergency() {
-    router.push("/navigation/emergency");
+    const params = new URLSearchParams({
+      source: "live-navigation",
+      type: "accident",
+      destination: destination?.name ?? "",
+      speed: String(Math.round(speedKph)),
+    });
+
+    if (currentLocation) {
+      params.set("lat", String(currentLocation.latitude));
+      params.set("lng", String(currentLocation.longitude));
+    }
+
+    router.push(`/navigation/emergency?${params.toString()}`);
   }
 
   return (
