@@ -85,7 +85,12 @@ export default function LiveNavigationPage() {
   const [message, setMessage] = useState("");
   const [followVehicle, setFollowVehicle] = useState(true);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [showMiraPanel, setShowMiraPanel] = useState(true);
+  const [showMiraPanel, setShowMiraPanel] = useState(false);
+  const [miraInput, setMiraInput] = useState("");
+  const [miraReply, setMiraReply] = useState(
+    "I am with you during this journey. Ask me about the route, traffic, fuel, parking, workshops or safety."
+  );
+  const [miraLoading, setMiraLoading] = useState(false);
   const [nextTurnText, setNextTurnText] =
     useState(DEFAULT_TURN);
   const [stoppedSince, setStoppedSince] =
@@ -506,7 +511,69 @@ export default function LiveNavigationPage() {
 
   function openAskMira() {
     setShowMiraPanel(true);
-    setMessage("Mira is ready. Ask for route, traffic, parking, fuel or safety help while navigation stays active.");
+    setMessage("");
+  }
+
+  async function askMiraDuringNavigation() {
+    const question = miraInput.trim();
+    if (!question || miraLoading) return;
+
+    setMiraLoading(true);
+    setMiraReply("");
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const response = await fetch("/api/mira", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token
+            ? { Authorization: `Bearer ${session.access_token}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          message: question,
+          context: {
+            mode: "live_navigation",
+            destination: destination?.name ?? null,
+            destination_address: destination?.address ?? null,
+            current_location: currentLocation,
+            selected_route: selectedRoute,
+            speed_kph: speedKph,
+            navigation_status: status,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.error || "Mira could not answer right now.");
+      }
+
+      const reply =
+        data?.reply ||
+        data?.message ||
+        data?.answer ||
+        data?.output_text ||
+        "I am still with you. Please ask that again.";
+
+      setMiraReply(
+        typeof reply === "string" ? reply : JSON.stringify(reply)
+      );
+      setMiraInput("");
+    } catch (caughtError) {
+      setMiraReply(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Mira could not answer right now."
+      );
+    } finally {
+      setMiraLoading(false);
+    }
   }
 
   function openEmergency() {
@@ -639,12 +706,85 @@ export default function LiveNavigationPage() {
             </div>
 
             <div className="pointer-events-auto mx-auto flex w-full max-w-3xl flex-col gap-3">
-              {showMiraPanel &&
-              traffic?.recommendation ? (
+              {showMiraPanel ? (
+                <div className="rounded-3xl border border-violet-400/30 bg-slate-950/95 p-4 shadow-2xl backdrop-blur-xl">
+                  <div className="flex items-start gap-3">
+                    <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-violet-500/25 text-xl">
+                      ✨
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-black uppercase tracking-[0.18em] text-violet-200">
+                            Ask Mira · Live Navigation
+                          </p>
+                          <p className="mt-1 text-xs text-slate-400">
+                            Navigation stays active while you talk to Mira.
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowMiraPanel(false)}
+                          className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.05] text-slate-300"
+                          aria-label="Close Mira"
+                        >
+                          ×
+                        </button>
+                      </div>
+
+                      <div className="mt-3 rounded-2xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm leading-6 text-slate-100">
+                        {miraLoading ? "Mira is thinking…" : miraReply}
+                      </div>
+
+                      <form
+                        className="mt-3 flex gap-2"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void askMiraDuringNavigation();
+                        }}
+                      >
+                        <input
+                          value={miraInput}
+                          onChange={(event) => setMiraInput(event.target.value)}
+                          placeholder="Ask: Is there traffic ahead?"
+                          className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-400/50"
+                          autoFocus
+                        />
+                        <button
+                          type="submit"
+                          disabled={miraLoading || !miraInput.trim()}
+                          className="rounded-2xl bg-violet-500 px-5 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {miraLoading ? "…" : "Ask"}
+                        </button>
+                      </form>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {[
+                          "Traffic ahead?",
+                          "Find fuel nearby",
+                          "Find parking",
+                          "Nearest workshop",
+                        ].map((prompt) => (
+                          <button
+                            key={prompt}
+                            type="button"
+                            onClick={() => setMiraInput(prompt)}
+                            className="rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-xs font-bold text-slate-300 hover:bg-white/[0.08]"
+                          >
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : traffic?.recommendation ? (
                 <div
                   className={`rounded-3xl border p-4 shadow-2xl backdrop-blur-xl ${
-                    traffic.recommendation
-                      .should_reroute
+                    traffic.recommendation.should_reroute
                       ? "border-amber-400/30 bg-amber-500/15"
                       : "border-emerald-400/30 bg-emerald-500/15"
                   }`}
@@ -658,21 +798,9 @@ export default function LiveNavigationPage() {
                         Mira route intelligence
                       </p>
                       <p className="mt-1 text-sm font-bold leading-6">
-                        {
-                          traffic.recommendation
-                            .mira_message
-                        }
+                        {traffic.recommendation.mira_message}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setShowMiraPanel(false)
-                      }
-                      className="text-slate-400"
-                    >
-                      ×
-                    </button>
                   </div>
                 </div>
               ) : null}
