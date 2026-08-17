@@ -406,6 +406,49 @@ export default function MiraNavigationPage() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const destinationName =
+      params.get("destination")?.trim() ||
+      params.get("name")?.trim() ||
+      "";
+    const latitudeText = params.get("lat")?.trim() || "";
+    const longitudeText = params.get("lng")?.trim() || "";
+
+    const latitude = Number(latitudeText);
+    const longitude = Number(longitudeText);
+
+    const hasValidCoordinates =
+      latitudeText.length > 0 &&
+      longitudeText.length > 0 &&
+      Number.isFinite(latitude) &&
+      Number.isFinite(longitude) &&
+      latitude >= -90 &&
+      latitude <= 90 &&
+      longitude >= -180 &&
+      longitude <= 180;
+
+    if (!destinationName && !hasValidCoordinates) return;
+
+    setForm((current) => ({
+      ...current,
+      destinationName:
+        destinationName || current.destinationName || "Destination",
+      destinationLatitude: hasValidCoordinates
+        ? latitude.toFixed(6)
+        : current.destinationLatitude,
+      destinationLongitude: hasValidCoordinates
+        ? longitude.toFixed(6)
+        : current.destinationLongitude,
+    }));
+
+    setPlaceSuggestions([]);
+    setShowSuggestions(false);
+    setResult(null);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function initialisePlaces() {

@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -33,6 +34,112 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "../supabase";
 import { resolveVehicleImage } from "./lib/vehicleImageLibrary";
+
+type PlaceSuggestion = {
+  placeId: string;
+  mainText: string;
+  secondaryText: string;
+  fullText: string;
+  prediction: any;
+};
+
+declare global {
+  interface Window {
+    google?: any;
+    __myVehiclePlacesPromise?: Promise<void>;
+    __myVehicleGooglePlacesReady?: () => void;
+  }
+}
+
+function loadGooglePlaces(apiKey: string) {
+  if (typeof window === "undefined") {
+    return Promise.reject(
+      new Error("Google Places can only load in the browser.")
+    );
+  }
+
+  if (
+    window.google?.maps?.importLibrary &&
+    window.google?.maps?.places
+  ) {
+    return Promise.resolve();
+  }
+
+  if (window.__myVehiclePlacesPromise) {
+    return window.__myVehiclePlacesPromise;
+  }
+
+  window.__myVehiclePlacesPromise = new Promise<void>(
+    (resolve, reject) => {
+      const callbackName = "__myVehicleGooglePlacesReady";
+
+      const finish = () => {
+        if (
+          window.google?.maps?.importLibrary &&
+          window.google?.maps?.places
+        ) {
+          resolve();
+          return;
+        }
+
+        reject(
+          new Error(
+            "Google Maps loaded, but the Places library did not become available."
+          )
+        );
+      };
+
+      window[callbackName] = finish;
+
+      const existing = document.querySelector<HTMLScriptElement>(
+        'script[data-my-vehicle-google-places="true"]'
+      );
+
+      if (existing) {
+        if (
+          window.google?.maps?.importLibrary &&
+          window.google?.maps?.places
+        ) {
+          finish();
+          return;
+        }
+
+        existing.addEventListener(
+          "error",
+          () => reject(new Error("Google Places failed to load.")),
+          { once: true }
+        );
+        return;
+      }
+
+      const script = document.createElement("script");
+      script.async = true;
+      script.defer = true;
+      script.dataset.myVehicleGooglePlaces = "true";
+
+      const params = new URLSearchParams({
+        key: apiKey,
+        v: "weekly",
+        libraries: "places,geometry",
+        callback: callbackName,
+        language: "en",
+        region: "IN",
+      });
+
+      script.src =
+        `https://maps.googleapis.com/maps/api/js?${params.toString()}`;
+
+      script.onerror = () => {
+        window.__myVehiclePlacesPromise = undefined;
+        reject(new Error("Google Places failed to load."));
+      };
+
+      document.head.appendChild(script);
+    }
+  );
+
+  return window.__myVehiclePlacesPromise;
+}
 
 type Vehicle = {
   id: number;
@@ -221,6 +328,17 @@ export default function HomePage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [destination, setDestination] = useState("");
   const [profileName, setProfileName] = useState("Siva");
+  const [placeSuggestions, setPlaceSuggestions] =
+    useState<PlaceSuggestion[]>([]);
+  const [placesReady, setPlacesReady] = useState(false);
+  const [searchingPlaces, setSearchingPlaces] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [placesError, setPlacesError] = useState("");
+  const autocompleteSessionRef = useRef<any>(null);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const googleMapsApiKey =
+    process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY?.trim() || "";
 
   const loadVehicles = useCallback(async () => {
     setLoading(true);
@@ -699,14 +817,215 @@ export default function HomePage() {
     [status]
   );
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function initialisePlaces() {
+      if (!googleMapsApiKey) {
+        setPlacesError(
+          "Destination suggestions are temporarily unavailable."
+        );
+        return;
+      }
+
+      try {
+        await loadGooglePlaces(googleMapsApiKey);
+
+        if (cancelled) return;
+
+        if (!window.google?.maps?.importLibrary) {
+          throw new Error(
+            "Google Maps importLibrary is unavailable after loading."
+          );
+        }
+
+        const { AutocompleteSessionToken } =
+          await window.google.maps.importLibrary("places");
+
+        autocompleteSessionRef.current =
+          new AutocompleteSessionToken();
+
+        setPlacesReady(true);
+        setPlacesError("");
+      } catch (caughtError) {
+        if (cancelled) return;
+
+        setPlacesError(
+          caughtError instanceof Error
+            ? caughtError.message
+            : "Unable to start destination search."
+        );
+      }
+    }
+
+    void initialisePlaces();
+
+    return () => {
+      cancelled = true;
+
+      if (searchTimerRef.current) {
+        clearTimeout(searchTimerRef.current);
+      }
+    };
+  }, [googleMapsApiKey]);
+
+  async function fetchPlaceSuggestions(value: string) {
+    const query = value.trim();
+
+    if (!placesReady || query.length < 2) {
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    setSearchingPlaces(true);
+    setPlacesError("");
+
+    try {
+      if (!window.google?.maps?.importLibrary) {
+        throw new Error("Google Places search is not ready.");
+      }
+
+      const { AutocompleteSuggestion } =
+        await window.google.maps.importLibrary("places");
+
+      const { suggestions } =
+        await AutocompleteSuggestion.fetchAutocompleteSuggestions({
+          input: query,
+          sessionToken: autocompleteSessionRef.current,
+          includedRegionCodes: ["in"],
+          language: "en-IN",
+          region: "IN",
+        });
+
+      const normalized = (suggestions || [])
+        .map((suggestion: any) => {
+          const prediction = suggestion.placePrediction;
+
+          if (!prediction) return null;
+
+          return {
+            placeId: prediction.placeId,
+            mainText:
+              prediction.mainText?.text ||
+              prediction.text?.text ||
+              "Place",
+            secondaryText:
+              prediction.secondaryText?.text || "",
+            fullText:
+              prediction.text?.text ||
+              prediction.mainText?.text ||
+              "Place",
+            prediction,
+          } satisfies PlaceSuggestion;
+        })
+        .filter(Boolean) as PlaceSuggestion[];
+
+      setPlaceSuggestions(normalized);
+      setShowSuggestions(normalized.length > 0);
+    } catch (caughtError) {
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+      setPlacesError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Unable to search destinations."
+      );
+    } finally {
+      setSearchingPlaces(false);
+    }
+  }
+
+  function handleDestinationChange(value: string) {
+    setDestination(value);
+
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current);
+    }
+
+    if (value.trim().length < 2) {
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    searchTimerRef.current = setTimeout(() => {
+      void fetchPlaceSuggestions(value);
+    }, 250);
+  }
+
+  async function selectPlaceSuggestion(
+    suggestion: PlaceSuggestion
+  ) {
+    setSearchingPlaces(true);
+    setPlacesError("");
+
+    try {
+      const place = suggestion.prediction.toPlace();
+
+      await place.fetchFields({
+        fields: ["displayName", "formattedAddress", "location"],
+      });
+
+      const latitude = place.location?.lat();
+      const longitude = place.location?.lng();
+
+      if (
+        typeof latitude !== "number" ||
+        typeof longitude !== "number"
+      ) {
+        throw new Error(
+          "The selected place did not provide coordinates."
+        );
+      }
+
+      const selectedName =
+        place.formattedAddress ||
+        place.displayName ||
+        suggestion.fullText;
+
+      setDestination(selectedName);
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+
+      const { AutocompleteSessionToken } =
+        await window.google.maps.importLibrary("places");
+
+      autocompleteSessionRef.current =
+        new AutocompleteSessionToken();
+
+      const params = new URLSearchParams({
+        destination: selectedName,
+        lat: String(latitude),
+        lng: String(longitude),
+      });
+
+      router.push(`/navigation?${params.toString()}`);
+    } catch (caughtError) {
+      setPlacesError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Unable to use the selected destination."
+      );
+    } finally {
+      setSearchingPlaces(false);
+    }
+  }
+
   function startDestinationSearch() {
     const value = destination.trim();
 
-    router.push(
-      value
-        ? `/navigation?destination=${encodeURIComponent(value)}`
-        : "/navigation"
-    );
+    if (!value) {
+      router.push("/navigation");
+      return;
+    }
+
+    if (placeSuggestions.length > 0) {
+      setShowSuggestions(true);
+      return;
+    }
+
+    void fetchPlaceSuggestions(value);
   }
 
   async function signOut() {
@@ -859,10 +1178,53 @@ export default function HomePage() {
 
                   <input
                     value={destination}
-                    onChange={(event) => setDestination(event.target.value)}
+                    onChange={(event) =>
+                      handleDestinationChange(event.target.value)
+                    }
+                    onFocus={() =>
+                      setShowSuggestions(placeSuggestions.length > 0)
+                    }
+                    onBlur={() => {
+                      window.setTimeout(
+                        () => setShowSuggestions(false),
+                        180
+                      );
+                    }}
                     placeholder="Where do you want to go?"
-                    className="w-full rounded-2xl border border-white/10 bg-slate-950/70 py-4 pl-12 pr-4 text-sm outline-none transition focus:border-blue-400/50"
+                    autoComplete="off"
+                    className="w-full rounded-2xl border border-white/10 bg-slate-950/70 py-4 pl-12 pr-24 text-sm outline-none transition focus:border-blue-400/50"
                   />
+
+                  {searchingPlaces ? (
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[11px] font-bold text-blue-300">
+                      Searching…
+                    </span>
+                  ) : null}
+
+                  {showSuggestions ? (
+                    <div className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-2xl border border-white/10 bg-slate-900 p-2 shadow-2xl">
+                      {placeSuggestions.map((suggestion) => (
+                        <button
+                          key={suggestion.placeId}
+                          type="button"
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() =>
+                            void selectPlaceSuggestion(suggestion)
+                          }
+                          className="block w-full rounded-xl px-4 py-3 text-left transition hover:bg-white/[0.06]"
+                        >
+                          <span className="block text-sm font-bold text-white">
+                            {suggestion.mainText}
+                          </span>
+                          {suggestion.secondaryText ? (
+                            <span className="mt-1 block text-xs text-slate-500">
+                              {suggestion.secondaryText}
+                            </span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
 
                 <Link
@@ -873,6 +1235,12 @@ export default function HomePage() {
                   <Mic size={20} />
                 </Link>
               </form>
+
+              {placesError ? (
+                <p className="mt-2 text-xs leading-5 text-amber-300">
+                  {placesError}
+                </p>
+              ) : null}
 
               <div className="mt-4 grid grid-cols-4 gap-3">
                 {navigationShortcuts.map((shortcut) => {
