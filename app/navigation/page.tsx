@@ -2119,7 +2119,25 @@ export default function MiraNavigationPage() {
 
             <button
               type="button"
-              onClick={startSosCountdown}
+              onClick={() => {
+                  const location = getEmergencyLocation();
+
+                  const params = new URLSearchParams({
+                    source: "navigation",
+                    type: "accident",
+                    destination: form.destinationName || "",
+                    speed: String(Math.round(speedKph)),
+                  });
+
+                  if (location) {
+                    params.set("lat", String(location.latitude));
+                    params.set("lng", String(location.longitude));
+                  }
+
+                  window.location.assign(
+                    `/navigation/emergency?${params.toString()}`
+                  );
+                }}
               disabled={
                 sosState === "countdown" ||
                 sosState === "sending"
