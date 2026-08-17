@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "@/supabase";
 
 type EmergencyType =
   | "accident"
@@ -26,6 +27,15 @@ type Coordinates = {
   latitude: number;
   longitude: number;
   accuracyMeters: number;
+};
+
+type EmergencyContact = {
+  id: number;
+  contact_name: string;
+  relationship: string | null;
+  mobile_number: string;
+  is_primary: boolean;
+  is_active: boolean;
 };
 
 type EmergencyService = {
@@ -124,7 +134,151 @@ export default function EmergencyNavigationPage() {
   >(null);
 
   const liveDispatchConnected = false;
-  const emergencyContactsConfigured = true;
+
+  const [emergencyContacts, setEmergencyContacts] =
+    useState<EmergencyContact[]>([]);
+  const [contactsLoading, setContactsLoading] =
+    useState(true);
+  const [contactsError, setContactsError] =
+    useState("");
+
+  const emergencyContactsConfigured =
+    emergencyContacts.length > 0;
+
+  useEffect(() => {
+    void loadEmergencyContacts();
+  }, []);
+
+  async function loadEmergencyContacts() {
+    setContactsLoading(true);
+    setContactsError("");
+
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        throw new Error(
+          "Please sign in again to load emergency contacts."
+        );
+      }
+
+      const { data, error } = await supabase
+        .from("emergency_contacts")
+        .select(
+          "id, contact_name, relationship, mobile_number, is_primary, is_active"
+        )
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("is_primary", { ascending: false })
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+
+      setEmergencyContacts(
+        (data || []) as EmergencyContact[]
+      );
+    } catch (caughtError) {
+      setContactsError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Unable to load emergency contacts."
+      );
+      setEmergencyContacts([]);
+    } finally {
+      setContactsLoading(false);
+    }
+  }
+
+  function maskPhoneNumber(value: string) {
+    const digits = value.replace(/\D/g, "");
+
+    if (digits.length <= 4) {
+      return value;
+    }
+
+    return `${"*".repeat(
+      Math.max(0, digits.length - 4)
+    )}${digits.slice(-4)}`;
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const lat = Number(params.get("lat"));
+    const lng = Number(params.get("lng"));
+    const requestedType = params.get("type");
+
+    let locationLoaded = false;
+
+    if (
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180
+    ) {
+      setLocation({
+        latitude: lat,
+        longitude: lng,
+        accuracyMeters: 0,
+      });
+      setLocationError("");
+      setStatusMessage(
+        "Emergency location received from live navigation. Refreshing GPS in the background."
+      );
+      locationLoaded = true;
+    }
+
+    if (
+      requestedType === "accident" ||
+      requestedType === "breakdown" ||
+      requestedType === "medical" ||
+      requestedType === "personal_safety"
+    ) {
+      setEmergencyType(requestedType);
+    }
+
+    if (!locationLoaded) {
+      try {
+        const saved = window.localStorage.getItem(
+          "myvehicle:last-navigation-location"
+        );
+
+        if (saved) {
+          const parsed = JSON.parse(saved) as {
+            latitude?: number;
+            longitude?: number;
+          };
+
+          if (
+            Number.isFinite(parsed.latitude) &&
+            Number.isFinite(parsed.longitude)
+          ) {
+            setLocation({
+              latitude: Number(parsed.latitude),
+              longitude: Number(parsed.longitude),
+              accuracyMeters: 0,
+            });
+            setLocationError("");
+            setStatusMessage(
+              "Using the last known navigation location while refreshing GPS."
+            );
+            locationLoaded = true;
+          }
+        }
+      } catch {
+        // Ignore invalid cached location and continue to live GPS detection.
+      }
+    }
+
+    void detectLocation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const selectedServices = useMemo(() => {
     if (
@@ -266,12 +420,23 @@ export default function EmergencyNavigationPage() {
         );
       },
       (error) => {
-        setLocationError(
-          error.code ===
-            error.PERMISSION_DENIED
-            ? "Location permission was denied."
-            : "Current location could not be detected."
-        );
+        setLocation((currentLocation) => {
+          if (currentLocation) {
+            setLocationError(
+              error.code === error.PERMISSION_DENIED
+                ? "Live GPS permission was denied. Using the last known navigation location."
+                : "Live GPS refresh failed. Using the last known navigation location."
+            );
+            return currentLocation;
+          }
+
+          setLocationError(
+            error.code === error.PERMISSION_DENIED
+              ? "Location permission was denied."
+              : "Current location could not be detected."
+          );
+          return null;
+        });
       },
       {
         enableHighAccuracy: true,
@@ -320,7 +485,9 @@ export default function EmergencyNavigationPage() {
     if (notifyContacts) {
       actions.push(
         emergencyContactsConfigured
-          ? "trusted-contact alert prepared"
+          ? `${emergencyContacts.length} trusted contact${
+              emergencyContacts.length === 1 ? "" : "s"
+            } ready`
           : "emergency contacts not configured"
       );
     }
@@ -624,6 +791,80 @@ export default function EmergencyNavigationPage() {
                 : "Not connected"
             }
           />
+        </section>
+
+        <section className="rounded-3xl border border-white/10 bg-slate-900/80 p-5 sm:p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
+                SOS recipients
+              </p>
+              <h2 className="mt-1 text-xl font-bold">
+                Emergency Contacts
+              </h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Only active contacts saved in your Profile are prepared for SOS alerts.
+              </p>
+            </div>
+
+            <Link
+              href="/profile"
+              className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-slate-950/60 px-4 py-2 text-sm font-bold text-white hover:bg-slate-900"
+            >
+              Manage Contacts
+            </Link>
+          </div>
+
+          {contactsLoading ? (
+            <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-4 text-sm text-slate-400">
+              Loading emergency contacts…
+            </div>
+          ) : contactsError ? (
+            <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-4 text-sm text-rose-100">
+              {contactsError}
+            </div>
+          ) : emergencyContacts.length === 0 ? (
+            <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-4 text-sm text-amber-100">
+              No active emergency contact is configured. Add at least one contact in Profile before relying on SOS contact alerts.
+            </div>
+          ) : (
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {emergencyContacts.map((contact) => (
+                <div
+                  key={contact.id}
+                  className="rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.06] p-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-bold text-white">
+                        {contact.contact_name}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-400">
+                        {contact.relationship || "Emergency contact"}
+                      </p>
+                    </div>
+
+                    <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-xs font-bold text-emerald-200">
+                      {contact.is_primary ? "Primary" : "Ready"}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between gap-3 border-t border-white/10 pt-3">
+                    <span className="text-sm text-slate-300">
+                      {maskPhoneNumber(contact.mobile_number)}
+                    </span>
+                    <span className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
+                      Alert prepared
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <p className="mt-4 text-xs leading-5 text-slate-500">
+            “Alert prepared” does not mean SMS or WhatsApp has been delivered. Delivery will only be shown after a messaging provider confirms it.
+          </p>
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[0.82fr_1.18fr]">
