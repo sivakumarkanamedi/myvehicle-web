@@ -5,13 +5,19 @@ type SosMode = "normal" | "silent";
 
 type SosRequestBody = {
   mode?: SosMode;
+  emergency_type?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  accuracy_meters?: number | null;
   destination?: string | null;
   navigation_status?: string | null;
   speed_kph?: number | null;
   selected_vehicle_id?: number | null;
   selected_vehicle_registration?: string | null;
+  share_location?: boolean;
+  notify_contacts?: boolean;
+  message?: string | null;
+  contact_ids?: number[];
   created_at?: string | null;
 };
 
@@ -91,6 +97,45 @@ function normalizeText(
   return normalized.slice(0, maximumLength);
 }
 
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (
+    error &&
+    typeof error === "object"
+  ) {
+    const candidate = error as {
+      message?: unknown;
+      details?: unknown;
+      hint?: unknown;
+      code?: unknown;
+    };
+
+    const parts = [
+      typeof candidate.message === "string"
+        ? candidate.message
+        : null,
+      typeof candidate.details === "string"
+        ? candidate.details
+        : null,
+      typeof candidate.hint === "string"
+        ? candidate.hint
+        : null,
+      typeof candidate.code === "string"
+        ? `Code: ${candidate.code}`
+        : null,
+    ].filter(Boolean);
+
+    if (parts.length > 0) {
+      return parts.join(" | ");
+    }
+  }
+
+  return "Unable to create the SOS event.";
+}
+
 export async function POST(request: Request) {
   try {
     const accessToken = getBearerToken(request);
@@ -156,7 +201,11 @@ export async function POST(request: Request) {
         .maybeSingle();
 
     if (recentSosError) {
-      throw recentSosError;
+      throw new Error(
+        `Unable to read SOS events: ${getErrorMessage(
+          recentSosError
+        )}`
+      );
     }
 
     if (recentSos) {
@@ -187,7 +236,11 @@ export async function POST(request: Request) {
       .order("created_at", { ascending: true });
 
     if (contactsError) {
-      throw contactsError;
+      throw new Error(
+        `Unable to load emergency contacts: ${getErrorMessage(
+          contactsError
+        )}`
+      );
     }
 
     const contacts =
@@ -246,7 +299,11 @@ export async function POST(request: Request) {
         .single();
 
     if (insertError) {
-      throw insertError;
+      throw new Error(
+        `Unable to create SOS event: ${getErrorMessage(
+          insertError
+        )}`
+      );
     }
 
     /*
@@ -286,10 +343,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to create the SOS event.",
+        error: getErrorMessage(error),
       },
       { status: 500 }
     );
@@ -393,7 +447,11 @@ export async function PATCH(request: Request) {
         .single();
 
     if (updateError) {
-      throw updateError;
+      throw new Error(
+        `Unable to update SOS event: ${getErrorMessage(
+          updateError
+        )}`
+      );
     }
 
     return NextResponse.json({
@@ -407,10 +465,7 @@ export async function PATCH(request: Request) {
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to update the SOS event.",
+        error: getErrorMessage(error),
       },
       { status: 500 }
     );
