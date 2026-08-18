@@ -41,6 +41,7 @@ type EmergencyContact = {
 type ContactAlertStatus =
   | "ready"
   | "sending"
+  | "queued"
   | "sent"
   | "failed"
   | "manual";
@@ -692,7 +693,8 @@ export default function EmergencyNavigationPage() {
         );
       }
 
-      const response = await fetch("/api/sos", {
+      // Step 1: create the main SOS event.
+      const sosResponse = await fetch("/api/sos", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -715,64 +717,138 @@ export default function EmergencyNavigationPage() {
         }),
       });
 
-      let data: any = null;
+      let sosData: any = null;
 
       try {
-        data = await response.json();
+        sosData = await sosResponse.json();
       } catch {
-        data = null;
+        sosData = null;
       }
 
-      if (!response.ok) {
+      if (!sosResponse.ok) {
         throw new Error(
-          data?.error ||
-            "Emergency alert provider did not accept the request."
+          sosData?.error ||
+            "Unable to create the SOS event."
         );
       }
 
-      const explicitlyDelivered =
-        data?.delivered === true ||
-        data?.sent === true ||
-        data?.success === true &&
-          (
-            data?.delivery_confirmed === true ||
-            data?.provider_message_id ||
-            data?.message_id
-          );
+      const sosEventId = Number(sosData?.event_id);
 
-      const deliveredIds = new Set<number>(
-        Array.isArray(data?.delivered_contact_ids)
-          ? data.delivered_contact_ids.map(Number)
-          : []
+      if (
+        !Number.isInteger(sosEventId) ||
+        sosEventId <= 0
+      ) {
+        throw new Error(
+          "SOS event was created without a valid event ID."
+        );
+      }
+
+      // Step 2: create one Smart Emergency Alert record per active contact.
+      const queueResults = await Promise.all(
+        emergencyContacts.map(async (contact) => {
+          try {
+            const response = await fetch(
+              "/api/sos/contact-alert",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({
+                  sos_event_id: sosEventId,
+                  contact_id: contact.id,
+                  emergency_type: emergencyType,
+                  latitude: location?.latitude ?? null,
+                  longitude: location?.longitude ?? null,
+                  message: buildEmergencyMessage(),
+                }),
+              }
+            );
+
+            let data: any = null;
+
+            try {
+              data = await response.json();
+            } catch {
+              data = null;
+            }
+
+            if (!response.ok) {
+              return {
+                contactId: contact.id,
+                success: false,
+                error:
+                  data?.error ||
+                  "Unable to queue trusted-contact alert.",
+              };
+            }
+
+            return {
+              contactId: contact.id,
+              success: true,
+              alertId: data?.alert_id ?? null,
+              status: data?.status ?? "queued",
+            };
+          } catch (error) {
+            return {
+              contactId: contact.id,
+              success: false,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Unable to queue trusted-contact alert.",
+            };
+          }
+        })
+      );
+
+      const queuedContactIds = new Set(
+        queueResults
+          .filter((result) => result.success)
+          .map((result) => result.contactId)
       );
 
       setContactAlertStatus((current) => {
         const next = { ...current };
 
         emergencyContacts.forEach((contact) => {
-          if (
-            deliveredIds.has(contact.id) ||
-            explicitlyDelivered
-          ) {
-            next[contact.id] = "sent";
-          } else {
-            next[contact.id] = "manual";
-          }
+          next[contact.id] =
+            queuedContactIds.has(contact.id)
+              ? "queued"
+              : "failed";
         });
 
         return next;
       });
 
-      if (
-        explicitlyDelivered ||
-        deliveredIds.size > 0
-      ) {
+      const queuedCount = queuedContactIds.size;
+      const failedCount =
+        emergencyContacts.length - queuedCount;
+
+      if (queuedCount === emergencyContacts.length) {
         setStatusMessage(
-          "SOS active. Emergency contact delivery was confirmed by the messaging backend."
+          `SOS active. Smart Emergency Alert queued for ${queuedCount} trusted contact${
+            queuedCount === 1 ? "" : "s"
+          }. Live GPS remains active. Push alarm, acknowledgement and escalation delivery are the next connected layer.`
+        );
+      } else if (queuedCount > 0) {
+        setStatusMessage(
+          `SOS active. Smart Emergency Alert queued for ${queuedCount} contact${
+            queuedCount === 1 ? "" : "s"
+          }, but ${failedCount} alert${
+            failedCount === 1 ? "" : "s"
+          } could not be queued. Use WhatsApp or SMS for any failed contact.`
         );
       } else {
-        setStatusMessage(
-          "SOS active. Your emergency details are prepared, but automatic SMS/WhatsApp delivery is not yet confirmed. Use the WhatsApp or SMS button below to notify your contact immediately."
+        const firstFailure = queueResults.find(
+          (result) => !result.success
+        );
+
+        throw new Error(
+          firstFailure && "error" in firstFailure
+            ? firstFailure.error
+            : "Unable to queue Smart Emergency Alerts."
         );
       }
     } catch (caughtError) {
@@ -780,7 +856,12 @@ export default function EmergencyNavigationPage() {
         const next = { ...current };
 
         emergencyContacts.forEach((contact) => {
-          next[contact.id] = "failed";
+          if (
+            next[contact.id] !== "queued" &&
+            next[contact.id] !== "sent"
+          ) {
+            next[contact.id] = "failed";
+          }
         });
 
         return next;
@@ -789,7 +870,7 @@ export default function EmergencyNavigationPage() {
       setStatusMessage(
         caughtError instanceof Error
           ? `${caughtError.message} Use WhatsApp or SMS below to notify your emergency contact manually.`
-          : "Automatic emergency-contact delivery failed. Use WhatsApp or SMS below."
+          : "Smart Emergency Alert could not be queued. Use WhatsApp or SMS below."
       );
     }
   }
@@ -1000,8 +1081,9 @@ export default function EmergencyNavigationPage() {
 
         <section className="rounded-3xl border border-amber-400/20 bg-amber-400/10 p-5 text-sm leading-6 text-amber-100">
           <strong>Important:</strong> this screen is a development preview.
-          It does not automatically contact emergency services, police,
-          hospitals, towing partners or family members.
+          Smart trusted-contact alerts can be queued, but the loud push alarm,
+          automatic phone call, police, hospital and towing dispatch layers are
+          not connected yet.
         </section>
 
         <section
@@ -1192,22 +1274,26 @@ export default function EmergencyNavigationPage() {
                         className={
                           contactAlertStatus[contact.id] === "sent"
                             ? "text-xs font-semibold uppercase tracking-wide text-emerald-300"
-                            : contactAlertStatus[contact.id] === "sending"
-                              ? "text-xs font-semibold uppercase tracking-wide text-cyan-300"
-                              : contactAlertStatus[contact.id] === "failed"
-                                ? "text-xs font-semibold uppercase tracking-wide text-rose-300"
-                                : "text-xs font-semibold uppercase tracking-wide text-amber-300"
+                            : contactAlertStatus[contact.id] === "queued"
+                              ? "text-xs font-semibold uppercase tracking-wide text-violet-300"
+                              : contactAlertStatus[contact.id] === "sending"
+                                ? "text-xs font-semibold uppercase tracking-wide text-cyan-300"
+                                : contactAlertStatus[contact.id] === "failed"
+                                  ? "text-xs font-semibold uppercase tracking-wide text-rose-300"
+                                  : "text-xs font-semibold uppercase tracking-wide text-amber-300"
                         }
                       >
                         {contactAlertStatus[contact.id] === "sent"
                           ? "Sent / confirmed"
-                          : contactAlertStatus[contact.id] === "sending"
-                            ? "Sending…"
-                            : contactAlertStatus[contact.id] === "failed"
-                              ? "Automatic send failed"
-                              : contactAlertStatus[contact.id] === "manual"
-                                ? "Manual send available"
-                                : "Ready"}
+                          : contactAlertStatus[contact.id] === "queued"
+                            ? "Smart alert queued"
+                            : contactAlertStatus[contact.id] === "sending"
+                              ? "Creating alert…"
+                              : contactAlertStatus[contact.id] === "failed"
+                                ? "Smart alert failed"
+                                : contactAlertStatus[contact.id] === "manual"
+                                  ? "Manual send available"
+                                  : "Ready"}
                       </span>
                     </div>
 
@@ -1242,7 +1328,7 @@ export default function EmergencyNavigationPage() {
           )}
 
           <p className="mt-4 text-xs leading-5 text-slate-500">
-            The app shows “Sent / confirmed” only when the backend returns explicit delivery confirmation. If automatic delivery is unavailable, use the WhatsApp or SMS buttons after SOS activation.
+            “Smart alert queued” means the emergency alert record has been created for the trusted contact. It does not yet mean the contact’s phone has received the buzz alarm. “Sent / confirmed” will only appear after the delivery layer confirms it. WhatsApp and SMS remain available as immediate fallbacks.
           </p>
         </section>
 
