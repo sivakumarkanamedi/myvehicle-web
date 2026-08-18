@@ -38,6 +38,13 @@ type EmergencyContact = {
   is_active: boolean;
 };
 
+type ContactAlertStatus =
+  | "ready"
+  | "sending"
+  | "sent"
+  | "failed"
+  | "manual";
+
 type EmergencyService = {
   id: number;
   type:
@@ -116,6 +123,12 @@ export default function EmergencyNavigationPage() {
   const [locationError, setLocationError] =
     useState("");
 
+  const [locationRefreshing, setLocationRefreshing] =
+    useState(false);
+
+  const [contactAlertStatus, setContactAlertStatus] =
+    useState<Record<number, ContactAlertStatus>>({});
+
   const [statusMessage, setStatusMessage] =
     useState(
       "Emergency mode is ready. No service has been contacted."
@@ -133,6 +146,10 @@ export default function EmergencyNavigationPage() {
     ReturnType<typeof setInterval> | null
   >(null);
 
+  const liveLocationWatchRef = useRef<number | null>(null);
+  const [liveLocationTracking, setLiveLocationTracking] =
+    useState(false);
+
   const liveDispatchConnected = false;
 
   const [emergencyContacts, setEmergencyContacts] =
@@ -148,6 +165,18 @@ export default function EmergencyNavigationPage() {
   useEffect(() => {
     void loadEmergencyContacts();
   }, []);
+
+  useEffect(() => {
+    setContactAlertStatus((current) => {
+      const next: Record<number, ContactAlertStatus> = {};
+
+      emergencyContacts.forEach((contact) => {
+        next[contact.id] = current[contact.id] || "ready";
+      });
+
+      return next;
+    });
+  }, [emergencyContacts]);
 
   async function loadEmergencyContacts() {
     setContactsLoading(true);
@@ -353,6 +382,17 @@ export default function EmergencyNavigationPage() {
           timerRef.current
         );
       }
+
+      if (
+        liveLocationWatchRef.current !== null &&
+        typeof navigator !== "undefined" &&
+        navigator.geolocation
+      ) {
+        navigator.geolocation.clearWatch(
+          liveLocationWatchRef.current
+        );
+        liveLocationWatchRef.current = null;
+      }
     };
   }, []);
 
@@ -396,11 +436,13 @@ export default function EmergencyNavigationPage() {
 
   async function detectLocation() {
     setLocationError("");
+    setLocationRefreshing(true);
 
     if (!navigator.geolocation) {
       setLocationError(
         "Location is not supported by this browser."
       );
+      setLocationRefreshing(false);
       return;
     }
 
@@ -415,8 +457,10 @@ export default function EmergencyNavigationPage() {
             position.coords.accuracy,
         });
 
+        setLocationError("");
+        setLocationRefreshing(false);
         setStatusMessage(
-          "Current location detected for the emergency preview."
+          "Current location detected and ready for emergency sharing."
         );
       },
       (error) => {
@@ -437,6 +481,8 @@ export default function EmergencyNavigationPage() {
           );
           return null;
         });
+
+        setLocationRefreshing(false);
       },
       {
         enableHighAccuracy: true,
@@ -445,6 +491,90 @@ export default function EmergencyNavigationPage() {
       }
     );
   }
+
+  function stopLiveLocationTracking() {
+    if (
+      liveLocationWatchRef.current !== null &&
+      typeof navigator !== "undefined" &&
+      navigator.geolocation
+    ) {
+      navigator.geolocation.clearWatch(
+        liveLocationWatchRef.current
+      );
+      liveLocationWatchRef.current = null;
+    }
+
+    setLiveLocationTracking(false);
+  }
+
+  function startLiveLocationTracking() {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.geolocation
+    ) {
+      setLocationError(
+        "Live GPS tracking is not supported by this browser."
+      );
+      setLiveLocationTracking(false);
+      return;
+    }
+
+    stopLiveLocationTracking();
+    setLocationError("");
+    setLiveLocationTracking(true);
+
+    liveLocationWatchRef.current =
+      navigator.geolocation.watchPosition(
+        (position) => {
+          const nextLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracyMeters: position.coords.accuracy,
+          };
+
+          setLocation(nextLocation);
+          setLocationError("");
+
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(
+              "myvehicle:last-navigation-location",
+              JSON.stringify({
+                latitude: nextLocation.latitude,
+                longitude: nextLocation.longitude,
+                capturedAt: new Date().toISOString(),
+              })
+            );
+          }
+        },
+        (error) => {
+          setLocationError(
+            error.code === error.PERMISSION_DENIED
+              ? "Live GPS permission was denied. Using the most recent detected location."
+              : "Live GPS tracking was interrupted. Using the most recent detected location."
+          );
+          setLiveLocationTracking(false);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 3000,
+        }
+      );
+  }
+
+  useEffect(() => {
+    if (stage === "active") {
+      startLiveLocationTracking();
+      return () => {
+        stopLiveLocationTracking();
+      };
+    }
+
+    stopLiveLocationTracking();
+
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
 
   function beginSosConfirmation() {
     setCountdown(5);
@@ -467,6 +597,201 @@ export default function EmergencyNavigationPage() {
     setStatusMessage(
       "SOS cancelled. No service or contact was notified."
     );
+  }
+
+  function normalizeEmergencyPhone(value: string) {
+    const digits = value.replace(/\D/g, "");
+
+    if (digits.length === 10) {
+      return `91${digits}`;
+    }
+
+    return digits;
+  }
+
+  function buildEmergencyMessage() {
+    const typeLabel = formatLabel(emergencyType);
+    const locationLink = location
+      ? `https://www.google.com/maps?q=${location.latitude},${location.longitude}`
+      : "Location unavailable";
+
+    return [
+      "MY VEHICLE EMERGENCY SOS",
+      `Emergency: ${typeLabel}`,
+      `Location: ${locationLink}`,
+      `Time: ${new Date().toLocaleString("en-IN")}`,
+      "Please contact me immediately and arrange help if required.",
+    ].join("\n");
+  }
+
+  function openWhatsAppAlert(contact: EmergencyContact) {
+    const number = normalizeEmergencyPhone(
+      contact.mobile_number
+    );
+
+    const message = encodeURIComponent(
+      buildEmergencyMessage()
+    );
+
+    window.open(
+      `https://wa.me/${number}?text=${message}`,
+      "_blank",
+      "noopener,noreferrer"
+    );
+
+    setContactAlertStatus((current) => ({
+      ...current,
+      [contact.id]: "manual",
+    }));
+  }
+
+  function openSmsAlert(contact: EmergencyContact) {
+    const number = normalizeEmergencyPhone(
+      contact.mobile_number
+    );
+
+    const message = encodeURIComponent(
+      buildEmergencyMessage()
+    );
+
+    window.location.href =
+      `sms:${number}?body=${message}`;
+
+    setContactAlertStatus((current) => ({
+      ...current,
+      [contact.id]: "manual",
+    }));
+  }
+
+  async function notifyEmergencyContacts() {
+    if (
+      !notifyContacts ||
+      emergencyContacts.length === 0
+    ) {
+      return;
+    }
+
+    setContactAlertStatus((current) => {
+      const next = { ...current };
+
+      emergencyContacts.forEach((contact) => {
+        next[contact.id] = "sending";
+      });
+
+      return next;
+    });
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error(
+          "Please sign in again before sending emergency alerts."
+        );
+      }
+
+      const response = await fetch("/api/sos", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          mode: silentSos ? "silent" : "normal",
+          emergency_type: emergencyType,
+          latitude: location?.latitude ?? null,
+          longitude: location?.longitude ?? null,
+          accuracy_meters:
+            location?.accuracyMeters ?? null,
+          share_location: shareLocation,
+          notify_contacts: true,
+          message: buildEmergencyMessage(),
+          contact_ids: emergencyContacts.map(
+            (contact) => contact.id
+          ),
+          created_at: new Date().toISOString(),
+        }),
+      });
+
+      let data: any = null;
+
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error ||
+            "Emergency alert provider did not accept the request."
+        );
+      }
+
+      const explicitlyDelivered =
+        data?.delivered === true ||
+        data?.sent === true ||
+        data?.success === true &&
+          (
+            data?.delivery_confirmed === true ||
+            data?.provider_message_id ||
+            data?.message_id
+          );
+
+      const deliveredIds = new Set<number>(
+        Array.isArray(data?.delivered_contact_ids)
+          ? data.delivered_contact_ids.map(Number)
+          : []
+      );
+
+      setContactAlertStatus((current) => {
+        const next = { ...current };
+
+        emergencyContacts.forEach((contact) => {
+          if (
+            deliveredIds.has(contact.id) ||
+            explicitlyDelivered
+          ) {
+            next[contact.id] = "sent";
+          } else {
+            next[contact.id] = "manual";
+          }
+        });
+
+        return next;
+      });
+
+      if (
+        explicitlyDelivered ||
+        deliveredIds.size > 0
+      ) {
+        setStatusMessage(
+          "SOS active. Emergency contact delivery was confirmed by the messaging backend."
+        );
+      } else {
+        setStatusMessage(
+          "SOS active. Your emergency details are prepared, but automatic SMS/WhatsApp delivery is not yet confirmed. Use the WhatsApp or SMS button below to notify your contact immediately."
+        );
+      }
+    } catch (caughtError) {
+      setContactAlertStatus((current) => {
+        const next = { ...current };
+
+        emergencyContacts.forEach((contact) => {
+          next[contact.id] = "failed";
+        });
+
+        return next;
+      });
+
+      setStatusMessage(
+        caughtError instanceof Error
+          ? `${caughtError.message} Use WhatsApp or SMS below to notify your emergency contact manually.`
+          : "Automatic emergency-contact delivery failed. Use WhatsApp or SMS below."
+      );
+    }
   }
 
   function activateSos() {
@@ -501,10 +826,14 @@ export default function EmergencyNavigationPage() {
     }
 
     setStatusMessage(
-      `SOS active in preview mode: ${actions.join(
+      `SOS active: ${actions.join(
         ", "
-      )}. No real emergency service has been contacted.`
+      )}. Emergency-contact delivery is being checked.`
     );
+
+    if (notifyContacts) {
+      void notifyEmergencyContacts();
+    }
 
     if (
       !silentSos &&
@@ -526,6 +855,8 @@ export default function EmergencyNavigationPage() {
   }
 
   function resetEmergency() {
+    stopLiveLocationTracking();
+
     if (timerRef.current) {
       clearInterval(
         timerRef.current
@@ -759,9 +1090,11 @@ export default function EmergencyNavigationPage() {
           <Metric
             label="Location"
             value={
-              location
-                ? "Detected"
-                : "Not detected"
+              liveLocationTracking
+                ? "Live tracking"
+                : location
+                  ? "Detected"
+                  : "Not detected"
             }
           />
 
@@ -849,13 +1182,59 @@ export default function EmergencyNavigationPage() {
                     </span>
                   </div>
 
-                  <div className="mt-3 flex items-center justify-between gap-3 border-t border-white/10 pt-3">
-                    <span className="text-sm text-slate-300">
-                      {maskPhoneNumber(contact.mobile_number)}
-                    </span>
-                    <span className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
-                      Alert prepared
-                    </span>
+                  <div className="mt-3 border-t border-white/10 pt-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm text-slate-300">
+                        {maskPhoneNumber(contact.mobile_number)}
+                      </span>
+
+                      <span
+                        className={
+                          contactAlertStatus[contact.id] === "sent"
+                            ? "text-xs font-semibold uppercase tracking-wide text-emerald-300"
+                            : contactAlertStatus[contact.id] === "sending"
+                              ? "text-xs font-semibold uppercase tracking-wide text-cyan-300"
+                              : contactAlertStatus[contact.id] === "failed"
+                                ? "text-xs font-semibold uppercase tracking-wide text-rose-300"
+                                : "text-xs font-semibold uppercase tracking-wide text-amber-300"
+                        }
+                      >
+                        {contactAlertStatus[contact.id] === "sent"
+                          ? "Sent / confirmed"
+                          : contactAlertStatus[contact.id] === "sending"
+                            ? "Sending…"
+                            : contactAlertStatus[contact.id] === "failed"
+                              ? "Automatic send failed"
+                              : contactAlertStatus[contact.id] === "manual"
+                                ? "Manual send available"
+                                : "Ready"}
+                      </span>
+                    </div>
+
+                    {stage === "active" &&
+                    contactAlertStatus[contact.id] !== "sent" ? (
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openWhatsAppAlert(contact)
+                          }
+                          className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-xs font-bold text-emerald-200"
+                        >
+                          WhatsApp
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openSmsAlert(contact)
+                          }
+                          className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-200"
+                        >
+                          SMS
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -863,7 +1242,7 @@ export default function EmergencyNavigationPage() {
           )}
 
           <p className="mt-4 text-xs leading-5 text-slate-500">
-            “Alert prepared” does not mean SMS or WhatsApp has been delivered. Delivery will only be shown after a messaging provider confirms it.
+            The app shows “Sent / confirmed” only when the backend returns explicit delivery confirmation. If automatic delivery is unavailable, use the WhatsApp or SMS buttons after SOS activation.
           </p>
         </section>
 
@@ -938,9 +1317,19 @@ export default function EmergencyNavigationPage() {
               onClick={() =>
                 void detectLocation()
               }
-              className="w-full rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-5 py-3 text-sm font-semibold text-cyan-100"
+              disabled={
+                locationRefreshing ||
+                liveLocationTracking
+              }
+              className="w-full rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-5 py-3 text-sm font-semibold text-cyan-100 disabled:opacity-60"
             >
-              Detect Current Location
+              {locationRefreshing
+                ? "Refreshing Location…"
+                : liveLocationTracking
+                  ? "✓ Live Location Updating Automatically"
+                  : location
+                    ? "✓ Current Location Detected · Refresh"
+                    : "Detect Current Location"}
             </button>
 
             {location ? (
@@ -968,6 +1357,18 @@ export default function EmergencyNavigationPage() {
                       location.accuracyMeters
                     )} m`}
                   />
+                </div>
+
+                <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs">
+                  {liveLocationTracking ? (
+                    <span className="font-semibold text-emerald-300">
+                      ● Live GPS is updating automatically while SOS is active.
+                    </span>
+                  ) : (
+                    <span className="text-slate-500">
+                      Live GPS starts automatically when SOS becomes active.
+                    </span>
+                  )}
                 </div>
 
                 <button
